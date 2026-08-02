@@ -136,3 +136,58 @@ def normalize_symbol(raw: str) -> str:
 def is_yahoo_safe(symbol: str) -> bool:
     """True when ``symbol`` only contains characters Yahoo symbols use."""
     return bool(symbol) and _YAHOO_SAFE.fullmatch(symbol) is not None
+
+
+# ---------------------------------------------------------------------------
+# DSE (Dhaka Stock Exchange) ticker detection.
+#
+# There is no reliable *syntactic* way to tell a DSE trading code (e.g.
+# "SQURPHARMA", "GP") apart from a US ticker by shape alone — both are
+# uppercase letters. So instead of guessing with a regex, this checks
+# membership against the real, current list of DSE trading codes (via
+# bdshare.get_current_trading_code()), cached in-process so normal requests
+# don't hit the network on every call.
+#
+# Any lookup failure (network blip, bdshare/dsebd unavailable) is treated as
+# "not a DSE ticker" rather than raising — a transient failure here should
+# fall through to the default (US) vendor chain, not break routing entirely.
+# ---------------------------------------------------------------------------
+
+import time as _time
+
+_DSE_TICKER_CACHE: set[str] | None = None
+_DSE_TICKER_CACHE_TS: float = 0.0
+_DSE_TICKER_CACHE_TTL_SECONDS = 6 * 60 * 60  # refresh twice a day — DSE listings change rarely
+
+
+def _load_dse_tickers() -> set[str]:
+    global _DSE_TICKER_CACHE, _DSE_TICKER_CACHE_TS
+
+    now = _time.time()
+    if _DSE_TICKER_CACHE is not None and (now - _DSE_TICKER_CACHE_TS) < _DSE_TICKER_CACHE_TTL_SECONDS:
+        return _DSE_TICKER_CACHE
+
+    try:
+        from bdshare import get_current_trading_code
+        df = get_current_trading_code()
+        tickers = {str(s).strip().upper() for s in df["symbol"] if str(s).strip()}
+        _DSE_TICKER_CACHE = tickers
+        _DSE_TICKER_CACHE_TS = now
+        logger.info("Loaded %d DSE trading codes for ticker routing.", len(tickers))
+        return tickers
+    except Exception as e:
+        logger.warning("Could not load DSE trading code list (%s); treating tickers as non-DSE for now.", e)
+        # Don't cache a failure with a fresh timestamp — retry on the next call
+        # instead of being stuck "not DSE" for the full TTL after one network blip.
+        return _DSE_TICKER_CACHE or set()
+
+
+def is_dse_ticker(symbol: str) -> bool:
+    """True if ``symbol`` is a currently-listed DSE trading code.
+
+    Used by route_to_vendor (interface.py) to auto-select the "dse" vendor
+    for BD tickers without requiring the user to switch config per call.
+    """
+    if not isinstance(symbol, str) or not symbol.strip():
+        return False
+    return symbol.strip().upper() in _load_dse_tickers()
