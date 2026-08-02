@@ -33,7 +33,7 @@ def extract_final_proposal(report_text: str) -> str:
     return f"FINAL TRANSACTION PROPOSAL: {m.group(1).upper()}"
 
 
-def _ta_utils():
+def _ta_utils(ticker: str = ""):
     """Grab the data-fetching + instrument-context helpers the agents need
     (lazy import).
 
@@ -45,16 +45,35 @@ def _ta_utils():
     build_instrument_context/get_language_instruction are unrelated to the
     data-source swap and stay on the real (non-black-box) tradingagents
     implementation.
+
+    ✅ CHANGED (DSE): when `ticker` is a live Dhaka Stock Exchange trading
+    code (checked via symbol_utils.is_dse_ticker, which consults bdshare's
+    real trading-code list), the data-fetching functions instead come from
+    tradingagents.agents.utils.agent_utils — the original, non-FMP toolset,
+    which routes through interface.py's route_to_vendor() and auto-selects
+    the "dse" vendor (bdshare-backed) for these tickers. Default ticker=""
+    preserves the old FMP/Finnhub behavior for every call site that doesn't
+    pass one — those only use build_instrument_context/get_language_
+    instruction, which are unaffected either way.
     """
     from tradingagents.agents.utils.agent_utils import (
         build_instrument_context,
         get_language_instruction,
     )
-    from .data_providers import (
-        get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement,
-        get_stock_data, get_indicators,
-        get_news, get_global_news,
-    )
+    from tradingagents.dataflows.symbol_utils import is_dse_ticker
+
+    if ticker and is_dse_ticker(ticker):
+        from tradingagents.agents.utils.agent_utils import (
+            get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement,
+            get_stock_data, get_indicators,
+            get_news, get_global_news,
+        )
+    else:
+        from .data_providers import (
+            get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement,
+            get_stock_data, get_indicators,
+            get_news, get_global_news,
+        )
     return {
         "build_instrument_context": build_instrument_context,
         "get_language_instruction": get_language_instruction,
@@ -95,11 +114,11 @@ def _sentiment_tools():
 # ==========================================================================
 def create_fundamentals_analyst(llm, log=print):
     from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-    U = _ta_utils()
 
     def node(state):
         current_date = state["trade_date"]
         company = state["company_of_interest"]
+        U = _ta_utils(company)
         instrument_context = U["build_instrument_context"](company)
         log(f"Fetching fundamentals for {company} on {current_date}")
 
@@ -234,11 +253,11 @@ RULES:
 def create_market_analyst(llm, indicators_list, log=print):
     from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
     from datetime import datetime, timedelta
-    U = _ta_utils()
 
     def node(state):
         current_date = state["trade_date"]
         company = state["company_of_interest"]
+        U = _ta_utils(company)
         asset_type = state.get("asset_type", "stock")
         instrument_context = U["build_instrument_context"](company, asset_type)
         log(f"Fetching market data for {company} on {current_date}")
@@ -317,11 +336,11 @@ At the very end, output a Markdown table with EXACTLY these columns:
 def create_news_analyst(llm, log=print):
     from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
     from datetime import datetime, timedelta
-    U = _ta_utils()
 
     def node(state):
         current_date = state["trade_date"]
         company = state["company_of_interest"]
+        U = _ta_utils(company)
         asset_type = state.get("asset_type", "stock")
         instrument_context = U["build_instrument_context"](company, asset_type)
         log(f"Fetching news for {company} on {current_date}")
