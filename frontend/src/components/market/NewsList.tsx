@@ -18,7 +18,7 @@ export function NewsList({ items, ticker }: { items: NewsItem[]; ticker?: string
       {items.map((item, i) => (
         <li key={`${item.title}-${i}`} className="py-3 first:pt-0 last:pb-0">
           {item.url ? (
-            
+            <a
               href={item.url}
               target="_blank"
               rel="noopener noreferrer"
