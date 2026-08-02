@@ -1,0 +1,164 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------------
+   AInvest design tokens — a local trading-research "terminal" aesthetic.
+   Dark by default; a light theme is available via the `.light` class on
+   <html> (toggled in the sidebar / Settings). Data-dense surfaces lean on
+   a monospace type for tickers, prices, and percentages so figures line
+   up in columns the way they would on a real quote screen.
+   ------------------------------------------------------------------------ */
+:root {
+  --color-bg: #0a0d12;
+  --color-bg-raised: #10141b;
+  --color-panel: #12161d;
+  --color-panel-hover: #171c25;
+  --color-border: #222a36;
+  --color-border-soft: #1a2029;
+
+  --color-text: #e7ecf3;
+  --color-text-muted: #8a97a8;
+  --color-text-faint: #576374;
+
+  --color-accent: #5b8cff;
+  --color-accent-soft: #5b8cff1a;
+  --color-accent-strong: #7ba1ff;
+
+  --color-buy: #22c55e;
+  --color-buy-soft: #22c55e1a;
+  --color-sell: #f0466e;
+  --color-sell-soft: #f0466e1a;
+  --color-hold: #f2b84b;
+  --color-hold-soft: #f2b84b1a;
+
+  --font-sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-display: var(--font-sans);
+}
+
+html.light {
+  --color-bg: #f5f6f8;
+  --color-bg-raised: #ffffff;
+  --color-panel: #ffffff;
+  --color-panel-hover: #f0f2f5;
+  --color-border: #e2e5ea;
+  --color-border-soft: #ebedf1;
+
+  --color-text: #12161d;
+  --color-text-muted: #576274;
+  --color-text-faint: #8a97a8;
+
+  --color-accent: #3a66e0;
+  --color-accent-soft: #3a66e01a;
+  --color-accent-strong: #2a52c9;
+}
+
+@theme inline {
+  --color-bg: var(--color-bg);
+  --color-bg-raised: var(--color-bg-raised);
+  --color-panel: var(--color-panel);
+  --color-panel-hover: var(--color-panel-hover);
+  --color-border: var(--color-border);
+  --color-border-soft: var(--color-border-soft);
+
+  --color-text: var(--color-text);
+  --color-text-muted: var(--color-text-muted);
+  --color-text-faint: var(--color-text-faint);
+
+  --color-accent: var(--color-accent);
+  --color-accent-soft: var(--color-accent-soft);
+  --color-accent-strong: var(--color-accent-strong);
+
+  --color-buy: var(--color-buy);
+  --color-buy-soft: var(--color-buy-soft);
+  --color-sell: var(--color-sell);
+  --color-sell-soft: var(--color-sell-soft);
+  --color-hold: var(--color-hold);
+  --color-hold-soft: var(--color-hold-soft);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-display: var(--font-display);
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+html {
+  color-scheme: dark;
+}
+html.light {
+  color-scheme: light;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.animate-pulse-dot {
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fade-in {
+  animation: fade-in 0.25s ease-out both;
+}

@@ -1,0 +1,441 @@
+"""
+RAEM memory layer — the piece that makes this more than a one-shot analyst.
+
+Ports the notebook's ChromaDB setup, rule-based regime tagging, outcome
+backfill (resolving old PENDING episodes with today's price into P&L), episode
+retrieval, and episode saving. Everything is lazily initialised so the web app
+starts instantly and only touches Ollama/Chroma when a real run begins.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import datetime, timedelta
+
+from . import config
+
+
+class RAEMMemory:
+    """Wraps the two Chroma collections and the RAEM operations over them."""
+
+    def __init__(self):
+        self.client = None
+        self.episodic = None
+        self.news = None
+        self._ready = False
+
+    def connect(self):
+        """Open the persistent Chroma client + collections. Safe to call twice.
+
+        Production integration: instead of opening a second, Ollama-only Chroma
+        client, RAEM now shares the platform's single persistent client and the
+        configurable embedding provider via ChromaManager. All RAEM logic below
+        (backfill, regime tagging, retrieval, save) is unchanged — only the
+        client/embedding wiring is centralized. Falls back to the original
+        self-managed client if the platform layer isn't importable (e.g. when the
+        notebook pipeline is used stand-alone).
+        """
+        if self._ready:
+            return
+        try:
+            from app.ai_engine.memory.chroma_manager import ChromaManager
+            from app.ai_engine.memory.schemas import Collection
+
+            mgr = ChromaManager.instance()
+            self.client = mgr.client
+            # RAEM episodic + news collections map onto the platform's canonical
+            # EPISODIC and NEWS collections so there is one source of truth.
+            self.episodic = mgr.get_collection(Collection.EPISODIC)
+            self.news = mgr.get_collection(Collection.NEWS)
+            self._ready = True
+            return
+        except Exception:
+            # Stand-alone fallback: original behaviour (Ollama embeddings).
+            import chromadb
+            from chromadb.utils import embedding_functions
+
+            ef = embedding_functions.OllamaEmbeddingFunction(
+                url=config.OLLAMA_EMBED_URL,
+                model_name=config.EMBED_MODEL,
+            )
+            self.client = chromadb.PersistentClient(path=config.CHROMA_DB_PATH)
+            self.episodic = self.client.get_or_create_collection(
+                name="raem_episodic_memory",
+                embedding_function=ef,
+                metadata={"description": "Regime-tagged daily trading episodes for RAEM"},
+            )
+            self.news = self.client.get_or_create_collection(
+                name="raem_news_corpus",
+                embedding_function=ef,
+                metadata={"description": "Chunked news articles for semantic retrieval"},
+            )
+            self._ready = True
+
+    def counts(self) -> dict:
+        try:
+            self.connect()
+            return {"episodes": self.episodic.count(), "news_chunks": self.news.count()}
+        except Exception as e:  # noqa: BLE001
+            return {"episodes": 0, "news_chunks": 0, "error": str(e)}
+
+    # -- outcome backfill ----------------------------------------------------
+    def backfill_pending_outcomes(self, company: str, today_date: str, min_days_held: int = 1) -> dict:
+        """Resolve PENDING episodes older than min_days_held using today's close."""
+        self.connect()
+        try:
+            pending = self.episodic.get(
+                where={"$and": [{"company": company}, {"outcome_status": "PENDING"}]}
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"resolved": 0, "note": f"query error: {e}"}
+
+        if not pending["ids"]:
+            return {"resolved": 0, "note": "no pending episodes"}
+
+        today_close = _fetch_latest_close(company, today_date)
+        if today_close is None:
+            return {"resolved": 0, "note": "could not fetch today's close"}
+
+        resolved = 0
+        details = []
+        for ep_id, meta in zip(pending["ids"], pending["metadatas"]):
+            ep_date = meta.get("trade_date", "")
+            try:
+                days_held = (datetime.strptime(today_date, "%Y-%m-%d")
+                             - datetime.strptime(ep_date, "%Y-%m-%d")).days
+            except ValueError:
+                continue
+            if days_held < min_days_held:
+                continue
+            try:
+                entry_price = float(meta.get("entry_price", "N/A"))
+            except (TypeError, ValueError):
+                continue
+
+            signal = meta.get("final_signal", "HOLD")
+            if signal == "BUY":
+                pnl = ((today_close - entry_price) / entry_price) * 100
+            elif signal == "SELL":
+                pnl = ((entry_price - today_close) / entry_price) * 100
+            else:
+                pnl = 0.0
+
+            label = "WIN" if pnl > 0.5 else "LOSS" if pnl < -0.5 else "FLAT"
+            meta.update({
+                "outcome_status": "RESOLVED",
+                "exit_price": str(round(today_close, 2)),
+                "pnl_pct": str(round(pnl, 2)),
+                "outcome_label": label,
+            })
+            self.episodic.update(ids=[ep_id], metadatas=[meta])
+            resolved += 1
+            details.append({"date": ep_date, "signal": signal, "pnl_pct": round(pnl, 2), "label": label})
+
+        return {"resolved": resolved, "details": details, "today_close": today_close}
+
+    # -- regime helpers ------------------------------------------------------
+    def most_recent_regime(self, company: str, exclude_date: str | None = None):
+        self.connect()
+        try:
+            all_eps = self.episodic.get(where={"company": company})
+        except Exception:  # noqa: BLE001
+            return None, None
+        if not all_eps["ids"]:
+            return None, None
+        dated = []
+        for m in all_eps["metadatas"]:
+            td = m.get("trade_date", "")
+            if td != (exclude_date or ""):
+                dated.append((td, m.get("regime", "")))
+        if not dated:
+            return None, None
+        dated.sort(key=lambda x: x[0])
+        return dated[-1][1], dated[-1][0]
+
+    def reflect_on_regime_transition(self, company, previous_regime, new_regime, llm) -> str:
+        self.connect()
+        try:
+            resolved = self.episodic.get(
+                where={"$and": [
+                    {"company": company},
+                    {"regime": previous_regime},
+                    {"outcome_status": "RESOLVED"},
+                ]}
+            )
+        except Exception as e:  # noqa: BLE001
+            return f"(Reflection skipped due to query error: {e})"
+
+        if not resolved["ids"]:
+            return (f"(Regime changed {previous_regime} -> {new_regime}, but no RESOLVED "
+                    f"outcomes exist yet for {previous_regime} to reflect on.)")
+
+        lines = []
+        for meta in resolved["metadatas"]:
+            lines.append(
+                f"- {meta.get('trade_date', '?')}: Signal={meta.get('final_signal', '?')}, "
+                f"P&L={meta.get('pnl_pct', '?')}%, Outcome={meta.get('outcome_label', '?')}"
+            )
+        history_text = "\n".join(lines)
+        prompt = (
+            f"You are a trading reflection agent. The market regime for {company} has just "
+            f"transitioned from {previous_regime} to {new_regime}.\n\n"
+            f"Here is the outcome history of past decisions made during the {previous_regime} regime:\n"
+            f"{history_text}\n\n"
+            f"In 3-4 concise sentences, reflect on:\n"
+            f"1. Whether decisions in {previous_regime} tended to be profitable or not.\n"
+            f"2. What that suggests about decision-making as we now enter a {new_regime} regime.\n"
+            f"3. One concrete caution or adjustment for the trader to consider.\n\n"
+            f"Be specific and reference the actual P&L numbers above. Do not invent data not shown."
+        )
+        try:
+            return llm.invoke(prompt).content.strip()
+        except Exception as e:  # noqa: BLE001
+            return f"(Reflection LLM call failed: {e})"
+
+    # -- retrieval -----------------------------------------------------------
+    def retrieve_similar_episodes(self, query_text, company=None, regime_filter=None, n_results=5) -> list:
+        self.connect()
+        where = _build_where(company, regime_filter)
+        try:
+            results = self.episodic.query(query_texts=[query_text], n_results=n_results, where=where)
+        except Exception:  # noqa: BLE001
+            return []
+        episodes = []
+        if results["ids"] and results["ids"][0]:
+            for i in range(len(results["ids"][0])):
+                episodes.append({
+                    "id": results["ids"][0][i],
+                    "document": results["documents"][0][i],
+                    "metadata": results["metadatas"][0][i],
+                    "distance": results["distances"][0][i],
+                })
+        return episodes
+
+    def list_episodes(self, company: str | None = None, limit: int = 100) -> list:
+        """All stored episodes for the memory browser, newest first."""
+        self.connect()
+        where = {"company": company} if company else None
+        try:
+            got = self.episodic.get(where=where)
+        except Exception:  # noqa: BLE001
+            return []
+        rows = []
+        for _id, doc, meta in zip(got["ids"], got["documents"], got["metadatas"]):
+            rows.append({"id": _id, "document": doc, "metadata": meta})
+        rows.sort(key=lambda r: r["metadata"].get("trade_date", ""), reverse=True)
+        return rows[:limit]
+
+    # -- news RAG ------------------------------------------------------------
+    def ingest_news(self, company, trade_date, company_news, global_news) -> int:
+        self.connect()
+        chunks, metas, ids = [], [], []
+        for source, text in [("company_news", company_news), ("global_news", global_news)]:
+            if not text or str(text).startswith("Error"):
+                continue
+            for idx, chunk in enumerate(_chunk_text(str(text))):
+                cid = hashlib.md5(f"{company}_{trade_date}_{source}_{idx}".encode()).hexdigest()[:16]
+                chunks.append(chunk)
+                metas.append({"company": company, "trade_date": trade_date, "source": source})
+                ids.append(cid)
+        if chunks:
+            self.news.upsert(ids=ids, documents=chunks, metadatas=metas)
+        return len(chunks)
+
+    # -- episode save --------------------------------------------------------
+    def save_episode(self, company, trade_date, indicators, fund_metrics,
+                     news_metrics, sentiment_metrics, final_decision_text,
+                     stock_data, macro_regime: str | None = None,
+                     verifier_status: str | None = None) -> dict:
+        self.connect()
+        doc, meta = build_episode_document(
+            company, trade_date, indicators, fund_metrics,
+            news_metrics, sentiment_metrics, final_decision_text, stock_data,
+            macro_regime=macro_regime, verifier_status=verifier_status,
+        )
+        ep_id = make_episode_id(company, trade_date)
+        self.episodic.upsert(ids=[ep_id], documents=[doc], metadatas=[meta])
+        return {"id": ep_id, "regime": meta["regime"], "signal": meta["final_signal"],
+                "document": doc, "metadata": meta}
+
+    # -- post-mortem ----------------------------------------------------------
+    def gather_resolved_episodes(self, company: str, max_n: int = 15) -> list[dict]:
+        """All of a company's RESOLVED episodes (any regime), newest first.
+
+        Used by the Post-Mortem / Self-Critique agent — unlike
+        `reflect_on_regime_transition` (which only looks at one prior regime,
+        and only runs on a regime change), this pulls the full cross-regime
+        track record every session.
+        """
+        self.connect()
+        try:
+            resolved = self.episodic.get(where={"$and": [
+                {"company": company},
+                {"outcome_status": "RESOLVED"},
+            ]})
+        except Exception:  # noqa: BLE001
+            return []
+        if not resolved["ids"]:
+            return []
+        rows = list(zip(resolved["ids"], resolved["metadatas"]))
+        rows.sort(key=lambda r: r[1].get("trade_date", ""), reverse=True)
+        return [m for _, m in rows[:max_n]]
+
+
+# --------------------------------------------------------------------------
+# Free functions (usable without a live Chroma connection)
+# --------------------------------------------------------------------------
+def classify_regime(indicators: dict) -> str:
+    """Rule-based market-regime tag from parsed technical indicators."""
+    def _num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    rsi = _num(indicators.get("rsi"))
+    macd = _num(indicators.get("macd"))
+    boll_ub = _num(indicators.get("boll_ub"))
+    boll_lb = _num(indicators.get("boll_lb"))
+
+    if rsi is not None:
+        if rsi >= 70:
+            return "OVERBOUGHT"
+        if rsi <= 30:
+            return "OVERSOLD"
+    if macd is not None:
+        if macd > 0:
+            band_width = None
+            if boll_ub is not None and boll_lb is not None and boll_lb != 0:
+                band_width = (boll_ub - boll_lb) / boll_lb
+            if band_width is not None and band_width > 0.05:
+                return "TRENDING_BULL_HIGH_VOL"
+            return "TRENDING_BULL"
+        if macd < 0:
+            return "TRENDING_BEAR"
+    return "NEUTRAL_RANGING"
+
+
+def make_episode_id(company: str, trade_date: str) -> str:
+    return hashlib.md5(f"{company}_{trade_date}".encode()).hexdigest()[:16]
+
+
+def build_episode_document(company, trade_date, indicators, fund_metrics,
+                           news_metrics, sentiment_metrics, final_decision_text,
+                           stock_data, macro_regime: str | None = None,
+                           verifier_status: str | None = None):
+    import re
+    regime = classify_regime(indicators)
+    entry_price = None
+    lines = [l for l in str(stock_data).split("\n") if l.strip() and not l.startswith("#")]
+    if len(lines) > 1:
+        for row in reversed(lines[1:]):
+            parts = row.split(",")
+            if len(parts) >= 5 and parts[4].strip() and parts[4].strip() not in ("", "Close"):
+                try:
+                    entry_price = float(parts[4].strip())
+                    break
+                except ValueError:
+                    pass
+
+    m = re.search(r"\*{0,2}(BUY|HOLD|SELL)\*{0,2}", final_decision_text, re.IGNORECASE)
+    final_signal = m.group(1).upper() if m else "N/A"
+
+    document_text = f"""Trading Episode: {company} on {trade_date}
+Market Regime: {regime}
+Macro Regime: {macro_regime or 'N/A'}
+Technical Indicators: RSI={indicators.get('rsi', 'N/A')}, MACD={indicators.get('macd', 'N/A')}, 50-SMA={indicators.get('close_50_sma', 'N/A')}
+Fundamentals: P/E={fund_metrics.get('pe_ratio', 'N/A')}, EPS={fund_metrics.get('eps_ttm', 'N/A')}, Market Cap={fund_metrics.get('market_cap', 'N/A')}
+News Sentiment: {news_metrics.get('overall_sentiment', 'N/A')} (Pos:{news_metrics.get('positive_count', 0)} Neg:{news_metrics.get('negative_count', 0)} Neu:{news_metrics.get('neutral_count', 0)})
+Social Sentiment Score: {sentiment_metrics.get('score', 'N/A')}/10 ({sentiment_metrics.get('overall', 'N/A')})
+Final Decision: {final_signal}
+Verifier Status: {verifier_status or 'N/A'}
+Decision Rationale Summary: {final_decision_text[:400]}"""
+
+    metadata = {
+        "company": company,
+        "trade_date": trade_date,
+        "regime": regime,
+        "macro_regime": macro_regime or "N/A",
+        "verifier_status": verifier_status or "N/A",
+        "final_signal": final_signal,
+        "rsi": str(indicators.get("rsi", "N/A")),
+        "macd": str(indicators.get("macd", "N/A")),
+        "pe_ratio": str(fund_metrics.get("pe_ratio", "N/A")),
+        "news_sentiment": str(news_metrics.get("overall_sentiment", "N/A")),
+        "entry_price": str(entry_price) if entry_price is not None else "N/A",
+        "outcome_status": "PENDING",
+        "exit_price": "N/A",
+        "pnl_pct": "N/A",
+        "outcome_label": "N/A",
+    }
+    return document_text.strip(), metadata
+
+
+def _build_where(company=None, regime_filter=None):
+    conditions = []
+    if company:
+        conditions.append({"company": company})
+    if regime_filter:
+        conditions.append({"regime": regime_filter})
+    if len(conditions) == 0:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
+
+
+def _chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
+    text = text.strip()
+    if len(text) <= chunk_size:
+        return [text] if text else []
+    chunks, start = [], 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+        if end < len(text):
+            last_period = chunk.rfind(". ")
+            if last_period > chunk_size * 0.5:
+                chunk = chunk[:last_period + 1]
+                end = start + last_period + 1
+        chunks.append(chunk.strip())
+        start = end - overlap
+    return [c for c in chunks if c]
+
+
+def _fetch_latest_close(company: str, as_of_date: str):
+    """Latest close price for outcome backfill.
+
+    ✅ FIXED: this used to import get_stock_data straight from
+    tradingagents.agents.utils.agent_utils (yfinance-backed) — a second,
+    independent data source from the Market Analyst stage, which now uses
+    .data_providers (FMP). That meant entry_price (saved via the Market
+    Analyst, FMP) and exit_price (fetched here, yfinance) could come from
+    two different vendors for the same P&L calculation, and this call would
+    fail independently of the rest of the pipeline if yfinance rate-limited.
+    Now uses the same FMP-backed get_stock_data as everywhere else — one
+    consistent price source end-to-end.
+    """
+    try:
+        from .data_providers import get_stock_data
+    except ImportError:
+        return None
+    end_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
+    start_dt = end_dt - timedelta(days=10)
+    try:
+        raw = get_stock_data.invoke({
+            "symbol": company,
+            "start_date": start_dt.strftime("%Y-%m-%d"),
+            "end_date": as_of_date,
+        })
+    except Exception:  # noqa: BLE001
+        return None
+    lines = [l for l in str(raw).split("\n") if l.strip() and not l.startswith("#")]
+    if len(lines) > 1:
+        for row in reversed(lines[1:]):
+            parts = row.split(",")
+            if len(parts) >= 5 and parts[4].strip() and parts[4].strip() not in ("", "Close"):
+                try:
+                    return float(parts[4].strip())
+                except ValueError:
+                    pass
+    return None
