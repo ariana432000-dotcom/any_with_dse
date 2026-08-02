@@ -490,6 +490,7 @@ export interface HistoryResponse {
 export interface NewsItem {
   title: string;
   source: string;
+  url?: string | null;
 }
 
 export interface NewsResponse {
