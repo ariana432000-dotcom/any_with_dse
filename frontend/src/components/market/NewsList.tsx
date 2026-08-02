@@ -24,14 +24,18 @@ return (
               rel="noopener noreferrer"
               className="text-sm leading-snug text-text hover:text-accent hover:underline"
             >
+              {item.url ? (
+            
+              href={item.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm leading-snug text-text hover:text-accent hover:underline"
+            >
               {item.title}
             </a>
           ) : (
             <p className="text-sm leading-snug text-text">{item.title}</p>
           )}
-          <p className="mt-1 text-xs text-text-faint">{item.source}</p>
-        </li>
-      ))}
     </ul>
   );
 }
