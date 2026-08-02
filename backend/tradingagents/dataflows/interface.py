@@ -22,6 +22,10 @@ from .dse_news import (
     get_global_news as get_dse_global_news,
     get_news as get_dse_news,
 )
+from .dse_stock_data import (
+    get_indicators as get_dse_indicators,
+    get_stock_data as get_dse_stock_data,
+)
 from .errors import (
     NoMarketDataError,
     VendorNotConfiguredError,
@@ -108,11 +112,13 @@ VENDOR_METHODS = {
     "get_stock_data": {
         "alpha_vantage": get_alpha_vantage_stock,
         "yfinance": get_YFin_data_online,
+        "dse": get_dse_stock_data,
     },
     # technical_indicators
     "get_indicators": {
         "alpha_vantage": get_alpha_vantage_indicator,
         "yfinance": get_stock_stats_indicators_window,
+        "dse": get_dse_indicators,
     },
     # fundamental_data
     "get_fundamentals": {
@@ -182,16 +188,47 @@ def get_vendor(category: str, method: str = None) -> str:
     # Fall back to category-level configuration
     return config.get("data_vendors", {}).get(category, "default")
 
+# Methods that take a ticker/symbol as their first argument. Used to
+# auto-detect DSE tickers and route them to the "dse" vendor regardless of
+# the configured vendor — so a user can type any ticker (AAPL, SQURPHARMA,
+# GP, ...) without switching config, matching the mixed US/BD workflow.
+# get_global_news is deliberately excluded — its first arg is curr_date, not
+# a ticker.
+_TICKER_FIRST_ARG_METHODS = {
+    "get_stock_data", "get_indicators", "get_fundamentals",
+    "get_balance_sheet", "get_cashflow", "get_income_statement", "get_news",
+}
+
+
+def _extract_ticker(method: str, args: tuple, kwargs: dict) -> str | None:
+    if method not in _TICKER_FIRST_ARG_METHODS:
+        return None
+    if args:
+        return args[0]
+    return kwargs.get("ticker") or kwargs.get("symbol")
+
+
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
-    vendor_config = get_vendor(category, method)
-    primary_vendors = [v.strip() for v in vendor_config.split(',')]
 
     if method not in VENDOR_METHODS:
         raise ValueError(f"Method '{method}' not supported")
 
     all_available_vendors = list(VENDOR_METHODS[method].keys())
+
+    # DSE tickers auto-route to the "dse" vendor, overriding whatever the
+    # configured chain says — no yfinance/alpha_vantage vendor has BD-listed
+    # tickers, so trying them first would just burn a call before falling
+    # through. See symbol_utils.is_dse_ticker for how membership is checked.
+    ticker = _extract_ticker(method, args, kwargs)
+    if ticker and "dse" in VENDOR_METHODS[method]:
+        from .symbol_utils import is_dse_ticker
+        if is_dse_ticker(ticker):
+            return _run_vendor_chain(method, ["dse"], category, args, kwargs)
+
+    vendor_config = get_vendor(category, method)
+    primary_vendors = [v.strip() for v in vendor_config.split(',')]
 
     # The configured vendor list IS the chain: we do NOT silently fall back to
     # vendors the user did not choose (#988/#289) — that returned data from an
@@ -209,6 +246,13 @@ def route_to_vendor(method: str, *args, **kwargs):
     else:
         vendor_chain = all_available_vendors
 
+    return _run_vendor_chain(method, vendor_chain, category, args, kwargs)
+
+
+def _run_vendor_chain(method: str, vendor_chain: list, category: str, args: tuple, kwargs: dict):
+    """Try each vendor in `vendor_chain` in order; same fallback/error
+    semantics regardless of whether the chain came from config or from
+    DSE ticker auto-detection."""
     last_no_data: NoMarketDataError | None = None
     first_error: Exception | None = None
     for vendor in vendor_chain:
