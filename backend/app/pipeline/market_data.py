@@ -217,7 +217,13 @@ def _parse_rss_titles(xml: str, limit: int):
         title = m.group(1)
         title = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", title).strip()
         src = re.search(r"<source[^>]*>(.*?)</source>", it, re.DOTALL)
-        out.append({"title": title, "source": (src.group(1).strip() if src else "News")})
+        link_m = re.search(r"<link>(.*?)</link>", it, re.DOTALL)
+        url = link_m.group(1).strip() if link_m else None
+        out.append({
+            "title": title,
+            "source": (src.group(1).strip() if src else "News"),
+            "url": url,
+        })
     return out
 
 
