@@ -1,6 +1,5 @@
 # ---- web framework ----
 fastapi>=0.111
-sentence-transformers>=3.0
 uvicorn[standard]>=0.30
 python-multipart>=0.0.9
 websockets>=12.0
@@ -24,6 +23,9 @@ langchain-anthropic>=0.3   # ✅ ADDED — was imported but missing here, would
 langchain-ollama>=0.1
 chromadb>=0.5
 markdown>=3.6
+sentence-transformers>=3.0   # local, keyless embedding provider for RAEM memory
+                             # (EMBEDDING_PROVIDER=sentence-transformers) — no
+                             # Ollama service and no external API key needed
 
 # ---- market data (keyless: yfinance/Stooq via TradingAgents + pipeline) ----
 yfinance>=0.2.40
@@ -32,9 +34,10 @@ requests>=2.32
 stockstats>=0.6.2   # required by tradingagents/dataflows (technical indicators);
                     # imported unconditionally, so every stage needs it, not just Market
 
-# ---- DSE (Bangladesh) vendor: dsebd.org/sharenews24.com scraping +
-# annual-report PDF extraction (see tradingagents/dataflows/dse_*.py and
-# DSE_VENDOR_README.md for setup/caveats) ----
+# ---- DSE (Bangladesh) vendor: bdshare (price/news/ticker-list) +
+# sharenews24.com scraping + annual-report PDF extraction (see
+# tradingagents/dataflows/dse_*.py and DSE_VENDOR_README.md) ----
+bdshare>=1.2       # maintained DSE scraper: OHLCV, trading-code list, news, P/E
 beautifulsoup4>=4.12
 pdfplumber>=0.11
 anthropic>=0.34   # raw SDK call in dse_statement_extractor.py, separate from langchain-anthropic above
