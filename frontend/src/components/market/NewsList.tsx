@@ -13,18 +13,11 @@ export function NewsList({ items, ticker }: { items: NewsItem[]; ticker?: string
     );
   }
 
-return (
+  return (
     <ul className="divide-y divide-border-soft">
       {items.map((item, i) => (
         <li key={`${item.title}-${i}`} className="py-3 first:pt-0 last:pb-0">
           {item.url ? (
-            
-              href={item.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm leading-snug text-text hover:text-accent hover:underline"
-            >
-              {item.url ? (
             
               href={item.url}
               target="_blank"
@@ -36,6 +29,9 @@ return (
           ) : (
             <p className="text-sm leading-snug text-text">{item.title}</p>
           )}
+          <p className="mt-1 text-xs text-text-faint">{item.source}</p>
+        </li>
+      ))}
     </ul>
   );
 }
