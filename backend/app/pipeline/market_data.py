@@ -284,7 +284,6 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
     Fails soft — any single source failing just means fewer results, never
     a crash, and never raises.
     """
-    out = []
     seen_titles = set()
     sym = symbol.upper()
     # urllib.parse.quote, not an f-string interpolation — some real DSE
@@ -302,12 +301,24 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
     )
     import re
     _sym_pattern = re.compile(rf"\b{re.escape(sym)}\b")
-    # Cap per-source so no single bdshare feed (get_corporate_announcements
-    # alone can return 400+ rows) crowds out every other source before the
-    # link-bearing sites (sharenews24/stocknow/amarstock) get a turn.
-    _PER_SOURCE_CAP = 3
 
-    def _add_rows(df, source):
+    # ✅ CHANGED: capped and grouped per *website*, not per bdshare feed.
+    # dsebd.org alone has 4 sub-feeds (get_all_news, price-sensitive,
+    # corporate, AGM) that could each contribute PER_WEBSITE_CAP items —
+    # left uncapped as a group, dsebd.org alone could fill the entire
+    # `limit` before sharenews24/stocknow/amarstock ever got a turn. Now
+    # all 4 dsebd sub-feeds share one bucket capped at PER_WEBSITE_CAP
+    # total, same as each of the other 3 sites — so with the default
+    # limit=12 you get up to 3 items from each of the 4 websites, evenly.
+    PER_WEBSITE_CAP = 3
+    groups: dict[str, list[dict]] = {
+        "dsebd.org": [],
+        "sharenews24.com": [],
+        "stocknow.com.bd": [],
+        "amarstock.com": [],
+    }
+
+    def _add_rows(df, source_label, group="dsebd.org"):
         """✅ CHANGED: get_price_sensitive_news/get_corporate_announcements
         accept a code= filter but DSE's own server ignores it for these two
         categories (confirmed live: ABBANK's feed returned EXCH/EIL/IPDC
@@ -315,12 +326,14 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
         actual \\bTICKER\\b match before being kept, regardless of which
         bdshare call it came from. Also dedupes by title text, since price-
         sensitive and corporate turned out to be near-identical unfiltered
-        feeds."""
+        feeds. `group` buckets all 4 dsebd sub-feeds into one shared,
+        capped list (see PER_WEBSITE_CAP note above)."""
+        bucket = groups[group]
         if df is None or df.empty:
             return 0
         n = 0
         for _, row in df.iterrows():
-            if n >= _PER_SOURCE_CAP:
+            if len(bucket) >= PER_WEBSITE_CAP:
                 break
             text = " | ".join(str(v) for v in row.values if str(v).strip())
             if not text or not _sym_pattern.search(text.upper()):
@@ -329,7 +342,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
                 continue
             seen_titles.add(text)
             trimmed = text if len(text) <= 300 else text[:300].rstrip() + "…"
-            out.append({"title": trimmed, "source": source, "url": dsebd_archive_url})
+            bucket.append({"title": trimmed, "source": source_label, "url": dsebd_archive_url})
             n += 1
         return n
 
@@ -393,15 +406,16 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             soup = BeautifulSoup(html, "html.parser")
             all_links = soup.find_all("a", href=True)
             matched = 0
+            bucket = groups["sharenews24.com"]
             for link in all_links:
                 title = link.get_text(strip=True)
                 if len(title) < 15 or company_name.lower() not in title.lower():
                     continue
                 href = link["href"]
                 full_link = href if href.startswith("http") else f"https://sharenews24.com{href}"
-                out.append({"title": title, "source": "sharenews24.com", "url": full_link})
+                bucket.append({"title": title, "source": "sharenews24.com", "url": full_link})
                 matched += 1
-                if matched >= _PER_SOURCE_CAP:
+                if matched >= PER_WEBSITE_CAP:
                     break
             _log.info("DSE news[%s] sharenews24: %d/%d links matched %r",
                       sym, matched, len(all_links), company_name)
@@ -441,15 +455,16 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             soup = BeautifulSoup(html, "html.parser")
             all_links = soup.find_all("a", href=True)
             matched = 0
+            bucket = groups["stocknow.com.bd"]
             for link in all_links:
                 title = link.get_text(strip=True)
                 if len(title) < 15 or company_name.lower() not in title.lower():
                     continue
                 href = link["href"]
                 full_link = href if href.startswith("http") else f"https://www.stocknow.com.bd{href}"
-                out.append({"title": title, "source": "stocknow.com.bd", "url": full_link})
+                bucket.append({"title": title, "source": "stocknow.com.bd", "url": full_link})
                 matched += 1
-                if matched >= _PER_SOURCE_CAP:
+                if matched >= PER_WEBSITE_CAP:
                     break
             _log.info("DSE news[%s] stocknow.com.bd: %d/%d links matched %r (0 total links found "
                       "usually means JS-rendered content — see comment above)",
@@ -474,15 +489,16 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             soup = BeautifulSoup(html, "html.parser")
             all_links = soup.find_all("a", href=True)
             matched = 0
+            bucket = groups["amarstock.com"]
             for link in all_links:
                 title = link.get_text(strip=True)
                 if len(title) < 15 or company_name.lower() not in title.lower():
                     continue
                 href = link["href"]
                 full_link = href if href.startswith("http") else f"https://www.amarstock.com{href}"
-                out.append({"title": title, "source": "amarstock.com", "url": full_link})
+                bucket.append({"title": title, "source": "amarstock.com", "url": full_link})
                 matched += 1
-                if matched >= _PER_SOURCE_CAP:
+                if matched >= PER_WEBSITE_CAP:
                     break
             _log.info("DSE news[%s] amarstock.com: %d/%d links matched %r",
                       sym, matched, len(all_links), company_name)
@@ -494,14 +510,23 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
         except Exception as e:  # noqa: BLE001
             _log.warning("DSE news[%s] amarstock.com fetch failed: %s", sym, e)
 
-    # With 7 sources capped at _PER_SOURCE_CAP each, `out` can hold more
-    # than `limit` items — trim by preferring linked items first (a
-    # clickable article is more useful than a disclosure row pointing at
-    # the same generic archive page), then fill any remaining slots with
-    # the rest in the order they were collected.
-    linked = [item for item in out if item["url"] and "news_archive.php" not in item["url"]]
-    rest = [item for item in out if item not in linked]
-    return (linked + rest)[:limit]
+    # ✅ CHANGED: round-robin across the 4 website buckets (dsebd.org,
+    # sharenews24.com, stocknow.com.bd, amarstock.com) instead of
+    # concatenating them in collection order — each bucket is already
+    # capped at PER_WEBSITE_CAP (3) above, so this just interleaves them
+    # (dsebd[0], sharenews24[0], stocknow[0], amarstock[0], dsebd[1], ...)
+    # so a page showing `limit` items sees a mix of all 4 sources instead
+    # of e.g. 3 dsebd items followed by 3 amarstock items back-to-back.
+    # A source that failed/returned nothing simply contributes 0 without
+    # breaking the interleave (its slot is skipped, not left blank).
+    order = ["dsebd.org", "sharenews24.com", "stocknow.com.bd", "amarstock.com"]
+    merged: list[dict] = []
+    for i in range(PER_WEBSITE_CAP):
+        for src in order:
+            bucket = groups[src]
+            if i < len(bucket):
+                merged.append(bucket[i])
+    return merged[:limit]
 
 
 # Best-effort ticker -> common company name, needed because sharenews24.com
