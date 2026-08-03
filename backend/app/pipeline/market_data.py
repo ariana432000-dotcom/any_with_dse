@@ -554,7 +554,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
     if company_name:
         try:
             req = urllib.request.Request(
-                "https://www.amarstock.com/dse-news",
+                "https://www.amarstock.com/dse-last-7-days-news",
                 headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
