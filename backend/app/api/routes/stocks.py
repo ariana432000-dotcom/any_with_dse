@@ -20,5 +20,5 @@ async def history(ticker: str, days: int = Query(220, ge=5, le=2000)) -> dict:
 
 
 @router.get("/{ticker}/news")
-async def news(ticker: str, limit: int = Query(8, ge=1, le=30)) -> dict:
-    return {"ticker": ticker.upper(), "items": await mds.get_news(ticker, limit)}
+async def news(ticker: str, limit: int = Query(8, ge=1, le=30), refresh: bool = Query(False)) -> dict:
+    return {"ticker": ticker.upper(), "items": await mds.get_news(ticker, limit, refresh=refresh)}
