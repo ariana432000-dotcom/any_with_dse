@@ -191,3 +191,162 @@ def is_dse_ticker(symbol: str) -> bool:
     if not isinstance(symbol, str) or not symbol.strip():
         return False
     return symbol.strip().upper() in _load_dse_tickers()
+
+
+# ---------------------------------------------------------------------------
+# Company-name resolution (Bengali or English) -> DSE trading code.
+#
+# bdshare's trading-code list is symbols only, no company names ("SQURPHARMA"
+# but not "Square Pharmaceuticals PLC"), and there's no verified bulk
+# name<->code mapping to scrape. So instead of building a name database,
+# this leans on the LLM's own general knowledge of Bangladeshi listed
+# companies to *guess* a code from free text (English or Bengali), then
+# validates that guess against the real trading-code list before trusting
+# it — the LLM disambiguates, it never gets to invent a code that doesn't
+# actually exist. Exact/fuzzy matching is tried first and is free (no LLM
+# call) for the common case of the user typing the code itself.
+# ---------------------------------------------------------------------------
+
+import difflib as _difflib
+
+_NAME_RESOLUTION_CACHE: dict[str, str | None] = {}
+
+
+def resolve_dse_ticker(query: str) -> str | None:
+    """
+    Resolve free-text input to a real DSE trading code, or None.
+
+    Tries, cheapest first:
+      1. Exact match (case-insensitive) against the live trading-code list.
+      2. Fuzzy match for near-miss typos of a trading code itself.
+      3. LLM lookup for anything that looks like a company name rather than
+         a bare code (contains a space, or non-ASCII/Bengali characters) --
+         the model's guess is only accepted if it's an actual member of the
+         real trading-code list, so a wrong or hallucinated guess degrades
+         to None rather than routing to a fake ticker.
+
+    Results are cached in-process (including "not found") so a repeated
+    query — especially one that needed an LLM call — doesn't redo the work.
+    """
+    if not isinstance(query, str) or not query.strip():
+        return None
+
+    raw = query.strip()
+    key = raw.lower()
+    if key in _NAME_RESOLUTION_CACHE:
+        return _NAME_RESOLUTION_CACHE[key]
+
+    tickers = _load_dse_tickers()
+    upper = raw.upper()
+
+    # 1. Exact match.
+    if upper in tickers:
+        _NAME_RESOLUTION_CACHE[key] = upper
+        return upper
+
+    # 2. Fuzzy match — only for single-token queries, so a multi-word company
+    # name doesn't get incorrectly snapped to some unrelated short code.
+    if " " not in raw and tickers:
+        close = _difflib.get_close_matches(upper, tickers, n=1, cutoff=0.8)
+        if close:
+            logger.info("Fuzzy-matched ticker input %r -> %r", raw, close[0])
+            _NAME_RESOLUTION_CACHE[key] = close[0]
+            return close[0]
+
+    # 3. LLM disambiguation for company-name-shaped input (has a space, or
+    # non-ASCII characters e.g. Bengali script).
+    looks_like_name = (" " in raw) or any(ord(c) > 127 for c in raw)
+    if not looks_like_name:
+        _NAME_RESOLUTION_CACHE[key] = None
+        return None
+
+    guess = _llm_guess_dse_ticker(raw)
+    resolved = guess if guess and guess.upper() in tickers else None
+    if guess and not resolved:
+        logger.info("LLM guessed ticker %r for %r but it's not a real DSE code; discarding.", guess, raw)
+    _NAME_RESOLUTION_CACHE[key] = resolved
+    return resolved
+
+
+def _llm_guess_dse_ticker(company_query: str) -> str | None:
+    try:
+        from app.pipeline.llm import invoke_llm_with_retry, make_llm
+    except Exception as e:
+        logger.warning("LLM not available for ticker-name resolution (%s); skipping.", e)
+        return None
+
+    prompt = (
+        "You are identifying Dhaka Stock Exchange (DSE, Bangladesh) trading "
+        "codes. The company name below may be written in Bengali or English, "
+        "full or shortened. Reply with ONLY the DSE trading code in uppercase "
+        "(e.g. SQURPHARMA, GP, ACI) and nothing else. If you are not "
+        "confident, reply exactly: NONE\n\n"
+        f"Company: {company_query}"
+    )
+    try:
+        llm = make_llm(temperature=0)
+        response = invoke_llm_with_retry(llm, prompt)
+        text = (response.content or "").strip().upper()
+    except Exception as e:
+        logger.warning("LLM ticker-name resolution failed for %r: %s", company_query, e)
+        return None
+
+    if not text or text == "NONE" or " " in text or len(text) > 15:
+        return None
+    return text
+
+
+# ---------------------------------------------------------------------------
+# International/US company-name resolution ("Apple", "Tesla Motors" -> ticker).
+#
+# Unlike DSE, Yahoo Finance has its own search endpoint that already maps
+# company names to tickers authoritatively (no LLM guessing needed, no
+# hallucination risk) -- yfinance exposes it as yf.Search. This is only
+# tried for input that doesn't already look like a ticker (see
+# _looks_like_company_name), so a normal "AAPL"/"aapl" input never pays for
+# an extra network call.
+# ---------------------------------------------------------------------------
+
+_GLOBAL_NAME_RESOLUTION_CACHE: dict[str, str | None] = {}
+
+
+def _looks_like_company_name(s: str) -> bool:
+    s = s.strip()
+    if not s:
+        return False
+    if " " in s:
+        return True
+    if not is_yahoo_safe(s.upper()):
+        return True
+    return len(s) > 10
+
+
+def resolve_global_ticker(query: str) -> str | None:
+    """
+    Resolve a free-text international/US company name to its ticker symbol
+    via Yahoo Finance's own search (yfinance.Search) -- e.g. "Apple" -> AAPL,
+    "Tesla Motors" -> TSLA. Only meant to be tried on input that doesn't
+    already look like a ticker (see _looks_like_company_name); results
+    (including failures) are cached in-process.
+    """
+    if not isinstance(query, str) or not query.strip():
+        return None
+    key = query.strip().lower()
+    if key in _GLOBAL_NAME_RESOLUTION_CACHE:
+        return _GLOBAL_NAME_RESOLUTION_CACHE[key]
+
+    resolved = None
+    try:
+        import yfinance as yf
+        quotes = yf.Search(query.strip(), max_results=5, news_count=0, lists_count=0).quotes
+        for q in quotes:
+            if q.get("quoteType") == "EQUITY" and q.get("symbol"):
+                resolved = q["symbol"]
+                break
+        if not resolved and quotes:
+            resolved = quotes[0].get("symbol")
+    except Exception as e:
+        logger.warning("yfinance company-name search failed for %r: %s", query, e)
+
+    _GLOBAL_NAME_RESOLUTION_CACHE[key] = resolved
+    return resolved
