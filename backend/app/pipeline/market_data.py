@@ -264,6 +264,29 @@ def fetch_recent_news(symbol: str, limit: int = 8):
     return _parse_rss_titles(xml, limit)
 
 
+_BDSHARE_DIAG_LOGGED = False
+
+
+def _log_bdshare_news_functions_once() -> None:
+    """Logs, once per process, which of the 4 bdshare news functions this
+    file relies on are actually present in the installed bdshare version --
+    so a Railway log immediately shows "bdshare 1.x has get_all_news but NOT
+    get_agm_news" instead of leaving that to be inferred from 4 separate
+    per-request ImportError lines."""
+    global _BDSHARE_DIAG_LOGGED
+    if _BDSHARE_DIAG_LOGGED:
+        return
+    _BDSHARE_DIAG_LOGGED = True
+    try:
+        import bdshare
+        version = getattr(bdshare, "__version__", "unknown")
+        wanted = ["get_all_news", "get_price_sensitive_news", "get_corporate_announcements", "get_agm_news"]
+        present = {name: hasattr(bdshare, name) for name in wanted}
+        _log.info("bdshare version=%s, news functions available: %s", version, present)
+    except Exception as e:  # noqa: BLE001
+        _log.warning("Could not introspect bdshare for diagnostics: %s", e)
+
+
 def _fetch_dse_news(symbol: str, limit: int = 8):
     """DSE headlines from every bdshare feed + sharenews24.com.
 
@@ -378,6 +401,8 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
         t = title.lower()
         return any(v.lower() in t for v in variants)
 
+    _log_bdshare_news_functions_once()
+
     try:
         from bdshare import get_all_news
         with _DSEBD_CONCURRENCY:
@@ -393,6 +418,9 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             df_psn = get_price_sensitive_news(code=sym)
         n = _add_rows(df_psn, "dsebd.org (price-sensitive)")
         _log.info("DSE news[%s] get_price_sensitive_news: %d rows", sym, n)
+    except ImportError as e:
+        _log.warning("DSE news[%s] bdshare has no get_price_sensitive_news in this installed "
+                      "version (%s) — not a network issue, check `pip show bdshare`.", sym, e)
     except Exception as e:  # noqa: BLE001
         _log.warning("DSE news[%s] get_price_sensitive_news failed: %s", sym, e)
 
@@ -402,11 +430,22 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             df_corp = get_corporate_announcements(code=sym)
         n = _add_rows(df_corp, "dsebd.org (corporate)")
         _log.info("DSE news[%s] get_corporate_announcements: %d rows", sym, n)
+    except ImportError as e:
+        _log.warning("DSE news[%s] bdshare has no get_corporate_announcements in this installed "
+                      "version (%s) — not a network issue, check `pip show bdshare`.", sym, e)
     except Exception as e:  # noqa: BLE001
         _log.warning("DSE news[%s] get_corporate_announcements failed: %s", sym, e)
 
     company_name = _load_dse_company_names().get(sym)
     _log.info("DSE news[%s] company_name lookup: %r", sym, company_name)
+    # ✅ CHANGED: combine English variants with any known Bengali forms for
+    # this ticker (see _DSE_COMPANY_NAMES_BENGALI_FALLBACK note above) --
+    # sharenews24.com/amarstock.com write almost exclusively in Bengali, so
+    # the English-only variant list never matched their real headlines.
+    all_name_variants = (
+        _company_name_variants(company_name) + _DSE_COMPANY_NAMES_BENGALI_FALLBACK.get(sym, [])
+        if company_name else []
+    )
 
     try:
         from bdshare import get_agm_news
@@ -419,6 +458,9 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             _log.info("DSE news[%s] get_agm_news: %d/%d rows matched %r", sym, n, len(df), needle)
         else:
             _log.info("DSE news[%s] get_agm_news: empty or no 'company' column", sym)
+    except ImportError as e:
+        _log.warning("DSE news[%s] bdshare has no get_agm_news in this installed "
+                      "version (%s) — not a network issue, check `pip show bdshare`.", sym, e)
     except Exception as e:  # noqa: BLE001
         _log.warning("DSE news[%s] get_agm_news failed: %s", sym, e)
 
@@ -439,7 +481,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             all_links = soup.find_all("a", href=True)
             matched = 0
             bucket = groups["sharenews24.com"]
-            variants = _company_name_variants(company_name)
+            variants = all_name_variants
             for link in all_links:
                 title = link.get_text(strip=True)
                 if len(title) < 15 or not _title_matches_company(title, variants):
@@ -524,7 +566,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             all_links = soup.find_all("a", href=True)
             matched = 0
             bucket = groups["amarstock.com"]
-            variants = _company_name_variants(company_name)
+            variants = all_name_variants
             for link in all_links:
                 title = link.get_text(strip=True)
                 if len(title) < 15 or not _title_matches_company(title, variants):
@@ -535,8 +577,32 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
                 matched += 1
                 if matched >= PER_WEBSITE_CAP:
                     break
-            _log.info("DSE news[%s] amarstock.com: %d/%d links matched %r",
-                      sym, matched, len(all_links), company_name)
+            # ✅ CHANGED: confirmed live (Railway log) that amarstock.com's
+            # <a href> links are all nav-menu chrome ("Online Training",
+            # "Compare Sector PE", ...) -- the real news text isn't inside
+            # anchor tags at all. Fall back to scanning ALL page text lines
+            # (not just links) when the anchor pass found nothing; matched
+            # lines get the page URL itself as their link (no per-article
+            # URL exists for a plain-text hit, same convention as the dsebd
+            # disclosure rows above).
+            if matched == 0:
+                page_text = soup.get_text("\n")
+                for line in page_text.splitlines():
+                    line = line.strip()
+                    if len(line) < 15 or not _title_matches_company(line, variants):
+                        continue
+                    if line in seen_titles:
+                        continue
+                    seen_titles.add(line)
+                    trimmed = line if len(line) <= 300 else line[:300].rstrip() + "…"
+                    bucket.append({"title": trimmed, "source": "amarstock.com", "url": "https://www.amarstock.com/dse-news"})
+                    matched += 1
+                    if matched >= PER_WEBSITE_CAP:
+                        break
+                _log.info("DSE news[%s] amarstock.com: text-line fallback found %d matches "
+                          "(anchor-tag pass found 0)", sym, matched)
+            _log.info("DSE news[%s] amarstock.com: %d/%d links matched %r (variants tried: %r)",
+                      sym, matched, len(all_links), company_name, variants)
             if matched == 0 and all_links:
                 qualifying = [l.get_text(strip=True) for l in all_links if len(l.get_text(strip=True)) >= 15]
                 step = max(1, len(qualifying) // 15)
@@ -583,6 +649,30 @@ _DSE_COMPANY_NAMES_FALLBACK = {
     "ISLAMIBANK": "Islami Bank",
     "LHBL": "LafargeHolcim Bangladesh",
     "RANFOUNDRY": "Rangpur Foundry",
+}
+
+# ✅ CHANGED: sharenews24.com (confirmed live, see Railway log sample) and
+# amarstock.com write Bengali-language headlines almost exclusively -- the
+# English fallback name above ("Square Pharmaceuticals") never appears in
+# their text, so matching against it alone silently returns 0 every time,
+# regardless of how the English matching logic is tuned. This is a
+# best-effort, hand-typed set of the common Bengali forms for the same 11
+# tickers -- NOT verified against live headlines from this environment
+# (network-restricted sandbox), so treat these as a starting point: check
+# the "sample headlines" log lines after deploying and correct any that
+# don't actually match real article text.
+_DSE_COMPANY_NAMES_BENGALI_FALLBACK = {
+    "SQURPHARMA": ["স্কয়ার ফার্মা", "স্কয়ার ফার্মাসিউটিক্যালস"],
+    "GP": ["গ্রামীণফোন"],
+    "BEXIMCO": ["বেক্সিমকো"],
+    "RFL": ["আরএফএল"],
+    "BATBC": ["বিএটিবিসি", "ব্রিটিশ আমেরিকান টোব্যাকো"],
+    "ROBI": ["রবি"],
+    "WALTONHIL": ["ওয়ালটন"],
+    "BRACBANK": ["ব্র্যাক ব্যাংক"],
+    "ISLAMIBANK": ["ইসলামী ব্যাংক"],
+    "LHBL": ["লাফার্জহোলসিম"],
+    "RANFOUNDRY": ["রংপুর ফাউন্ড্রি"],
 }
 
 _DSE_COMPANY_NAMES_LIVE: dict[str, str] | None = None
