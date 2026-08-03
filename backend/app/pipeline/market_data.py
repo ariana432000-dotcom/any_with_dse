@@ -248,23 +248,67 @@ def fetch_recent_news(symbol: str, limit: int = 8):
 
 
 def _fetch_dse_news(symbol: str, limit: int = 8):
-    """DSE headlines: bdshare's dsebd.org disclosures (no per-article URL —
-    these are corporate announcements, not linkable articles) plus
-    sharenews24.com keyword matches (real article URLs). Fails soft to [].
+    """DSE headlines from every bdshare feed + sharenews24.com.
+
+    bdshare sources (matched by ticker code — reliable, structured, but no
+    per-article URL since these are disclosure rows, not articles):
+      - get_all_news                general dsebd.org disclosures
+      - get_price_sensitive_news    price-sensitive announcements
+      - get_corporate_announcements separate announcement feed (criteria=2)
+      - get_agm_news                AGM/dividend declarations — has no
+                                     per-ticker filter, so this fetches all
+                                     companies and filters by name locally
+
+    sharenews24.com (matched by company NAME, not ticker code — headlines
+    reference "Square Pharmaceuticals", never "SQURPHARMA", so matching the
+    raw ticker here silently never fires). Only attempted for tickers in
+    _DSE_COMPANY_NAMES below; these DO carry real clickable article URLs.
+
+    Fails soft — any single source failing just means fewer results, never
+    a crash, and never raises.
     """
     out = []
+    sym = symbol.upper()
+
+    def _add_rows(df, source):
+        if df is None or df.empty:
+            return
+        for _, row in df.iterrows():
+            text = " | ".join(str(v) for v in row.values if str(v).strip())
+            if text:
+                out.append({"title": text[:200], "source": source, "url": None})
+
     try:
         from bdshare import get_all_news
-        df = get_all_news(code=symbol.upper())
-        if df is not None and not df.empty:
-            for _, row in df.head(limit).iterrows():
-                text = " | ".join(str(v) for v in row.values if str(v).strip())
-                if text:
-                    out.append({"title": text[:200], "source": "dsebd.org", "url": None})
+        _add_rows(get_all_news(code=sym), "dsebd.org")
     except Exception:  # noqa: BLE001
         pass
 
-    if len(out) < limit:
+    try:
+        from bdshare import get_price_sensitive_news
+        _add_rows(get_price_sensitive_news(code=sym), "dsebd.org (price-sensitive)")
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from bdshare import get_corporate_announcements
+        _add_rows(get_corporate_announcements(code=sym), "dsebd.org (corporate)")
+    except Exception:  # noqa: BLE001
+        pass
+
+    company_name = _DSE_COMPANY_NAMES.get(sym)
+
+    try:
+        from bdshare import get_agm_news
+        df = get_agm_news()
+        if df is not None and not df.empty and "company" in df.columns:
+            needle = (company_name or sym).lower()
+            mask = df["company"].astype(str).str.lower().str.contains(needle, na=False)
+            _add_rows(df[mask], "dsebd.org (AGM/dividend)")
+    except Exception:  # noqa: BLE001
+        pass
+
+    if company_name and len(out) < limit:
         try:
             req = urllib.request.Request(
                 "https://sharenews24.com",
@@ -276,7 +320,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             soup = BeautifulSoup(html, "html.parser")
             for link in soup.find_all("a", href=True):
                 title = link.get_text(strip=True)
-                if len(title) < 15 or symbol.lower() not in title.lower():
+                if len(title) < 15 or company_name.lower() not in title.lower():
                     continue
                 href = link["href"]
                 full_link = href if href.startswith("http") else f"https://sharenews24.com{href}"
@@ -287,6 +331,27 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             pass
 
     return out[:limit]
+
+
+# Best-effort ticker -> common company name, needed because sharenews24.com
+# (and get_agm_news's company-name matching) reference companies by name,
+# never by DSE trading code. Not exhaustive — extend as you cover more
+# tickers. A ticker missing here still gets full bdshare coverage above
+# (those match by code, not name); it just skips the sharenews24 pass and
+# falls back to code-matching against get_agm_news's company column, which
+# usually won't hit.
+_DSE_COMPANY_NAMES = {
+    "SQURPHARMA": "Square Pharmaceuticals",
+    "GP": "Grameenphone",
+    "BEXIMCO": "Beximco",
+    "RFL": "RFL",
+    "BATBC": "British American Tobacco Bangladesh",
+    "ROBI": "Robi Axiata",
+    "WALTONHIL": "Walton Hi-Tech",
+    "BRACBANK": "BRAC Bank",
+    "ISLAMIBANK": "Islami Bank",
+    "LHBL": "LafargeHolcim Bangladesh",
+}
 
 
 def _parse_rss_titles(xml: str, limit: int):
