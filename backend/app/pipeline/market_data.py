@@ -13,8 +13,11 @@ network, and it fails soft so a run never crashes on a bad symbol.
 from __future__ import annotations
 
 import io
+import logging
 import urllib.request
 from datetime import datetime, timedelta
+
+_log = logging.getLogger(__name__)
 
 
 def _stooq_symbol(symbol: str, asset_type: str = "stock") -> str:
@@ -269,34 +272,43 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
     """
     out = []
     sym = symbol.upper()
+    dsebd_archive_url = f"https://www.dsebd.org/news_archive.php?symbol={sym}"
 
     def _add_rows(df, source):
         if df is None or df.empty:
-            return
+            return 0
+        n = 0
         for _, row in df.iterrows():
             text = " | ".join(str(v) for v in row.values if str(v).strip())
             if text:
-                out.append({"title": text[:200], "source": source, "url": None})
+                trimmed = text if len(text) <= 300 else text[:300].rstrip() + "…"
+                out.append({"title": trimmed, "source": source, "url": dsebd_archive_url})
+                n += 1
+        return n
 
     try:
         from bdshare import get_all_news
-        _add_rows(get_all_news(code=sym), "dsebd.org")
-    except Exception:  # noqa: BLE001
-        pass
+        n = _add_rows(get_all_news(code=sym), "dsebd.org")
+        _log.info("DSE news[%s] get_all_news: %d rows", sym, n)
+    except Exception as e:  # noqa: BLE001
+        _log.warning("DSE news[%s] get_all_news failed: %s", sym, e)
 
     try:
         from bdshare import get_price_sensitive_news
-        _add_rows(get_price_sensitive_news(code=sym), "dsebd.org (price-sensitive)")
-    except Exception:  # noqa: BLE001
-        pass
+        n = _add_rows(get_price_sensitive_news(code=sym), "dsebd.org (price-sensitive)")
+        _log.info("DSE news[%s] get_price_sensitive_news: %d rows", sym, n)
+    except Exception as e:  # noqa: BLE001
+        _log.warning("DSE news[%s] get_price_sensitive_news failed: %s", sym, e)
 
     try:
         from bdshare import get_corporate_announcements
-        _add_rows(get_corporate_announcements(code=sym), "dsebd.org (corporate)")
-    except Exception:  # noqa: BLE001
-        pass
+        n = _add_rows(get_corporate_announcements(code=sym), "dsebd.org (corporate)")
+        _log.info("DSE news[%s] get_corporate_announcements: %d rows", sym, n)
+    except Exception as e:  # noqa: BLE001
+        _log.warning("DSE news[%s] get_corporate_announcements failed: %s", sym, e)
 
     company_name = _DSE_COMPANY_NAMES.get(sym)
+    _log.info("DSE news[%s] company_name lookup: %r", sym, company_name)
 
     try:
         from bdshare import get_agm_news
@@ -304,31 +316,113 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
         if df is not None and not df.empty and "company" in df.columns:
             needle = (company_name or sym).lower()
             mask = df["company"].astype(str).str.lower().str.contains(needle, na=False)
-            _add_rows(df[mask], "dsebd.org (AGM/dividend)")
-    except Exception:  # noqa: BLE001
-        pass
+            n = _add_rows(df[mask], "dsebd.org (AGM/dividend)")
+            _log.info("DSE news[%s] get_agm_news: %d/%d rows matched %r", sym, n, len(df), needle)
+        else:
+            _log.info("DSE news[%s] get_agm_news: empty or no 'company' column", sym)
+    except Exception as e:  # noqa: BLE001
+        _log.warning("DSE news[%s] get_agm_news failed: %s", sym, e)
 
-    if company_name and len(out) < limit:
+    if not company_name:
+        _log.info("DSE news[%s] skipping sharenews24 — no company name mapped for this ticker", sym)
+    elif len(out) < limit:
         try:
             req = urllib.request.Request(
                 "https://sharenews24.com",
                 headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
+                status = getattr(resp, "status", "?")
                 html = resp.read().decode("utf-8", "replace")
+            _log.info("DSE news[%s] sharenews24 fetched: HTTP %s, %d bytes", sym, status, len(html))
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(html, "html.parser")
-            for link in soup.find_all("a", href=True):
+            all_links = soup.find_all("a", href=True)
+            matched = 0
+            for link in all_links:
                 title = link.get_text(strip=True)
                 if len(title) < 15 or company_name.lower() not in title.lower():
                     continue
                 href = link["href"]
                 full_link = href if href.startswith("http") else f"https://sharenews24.com{href}"
                 out.append({"title": title, "source": "sharenews24.com", "url": full_link})
+                matched += 1
                 if len(out) >= limit:
                     break
-        except Exception:  # noqa: BLE001
-            pass
+            _log.info("DSE news[%s] sharenews24: %d/%d links matched %r",
+                      sym, matched, len(all_links), company_name)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("DSE news[%s] sharenews24 fetch failed: %s", sym, e)
+
+    # stocknow.com.bd — ⚠️ this site's news page is JS-rendered per
+    # DSE_VENDOR_README.md's own notes (a discover_stocknow_api.py tool was
+    # written to find the underlying data API but never wired in here). A
+    # plain requests+BeautifulSoup fetch below may legitimately come back
+    # with 0 matches even though the page "looks" like it loaded — the log
+    # line distinguishes a real fetch failure from "page loaded, but the
+    # actual headlines are injected by JS after load, so the raw HTML we
+    # got has no <a> tags with real article text in them."
+    if company_name and len(out) < limit:
+        try:
+            req = urllib.request.Request(
+                "https://www.stocknow.com.bd/news",
+                headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = getattr(resp, "status", "?")
+                html = resp.read().decode("utf-8", "replace")
+            _log.info("DSE news[%s] stocknow.com.bd fetched: HTTP %s, %d bytes", sym, status, len(html))
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+            all_links = soup.find_all("a", href=True)
+            matched = 0
+            for link in all_links:
+                title = link.get_text(strip=True)
+                if len(title) < 15 or company_name.lower() not in title.lower():
+                    continue
+                href = link["href"]
+                full_link = href if href.startswith("http") else f"https://www.stocknow.com.bd{href}"
+                out.append({"title": title, "source": "stocknow.com.bd", "url": full_link})
+                matched += 1
+                if len(out) >= limit:
+                    break
+            _log.info("DSE news[%s] stocknow.com.bd: %d/%d links matched %r (0 total links found "
+                      "usually means JS-rendered content — see comment above)",
+                      sym, matched, len(all_links), company_name)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("DSE news[%s] stocknow.com.bd fetch failed: %s", sym, e)
+
+    # amarstock.com/dse-news — same best-effort static-HTML approach as
+    # sharenews24; unverified against the live site (not reachable from my
+    # sandbox), so the log line is the only way to know if this worked.
+    if company_name and len(out) < limit:
+        try:
+            req = urllib.request.Request(
+                "https://www.amarstock.com/dse-news",
+                headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = getattr(resp, "status", "?")
+                html = resp.read().decode("utf-8", "replace")
+            _log.info("DSE news[%s] amarstock.com fetched: HTTP %s, %d bytes", sym, status, len(html))
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+            all_links = soup.find_all("a", href=True)
+            matched = 0
+            for link in all_links:
+                title = link.get_text(strip=True)
+                if len(title) < 15 or company_name.lower() not in title.lower():
+                    continue
+                href = link["href"]
+                full_link = href if href.startswith("http") else f"https://www.amarstock.com{href}"
+                out.append({"title": title, "source": "amarstock.com", "url": full_link})
+                matched += 1
+                if len(out) >= limit:
+                    break
+            _log.info("DSE news[%s] amarstock.com: %d/%d links matched %r",
+                      sym, matched, len(all_links), company_name)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("DSE news[%s] amarstock.com fetch failed: %s", sym, e)
 
     return out[:limit]
 
