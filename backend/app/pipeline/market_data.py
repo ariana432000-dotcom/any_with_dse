@@ -372,6 +372,9 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
                     break
             _log.info("DSE news[%s] sharenews24: %d/%d links matched %r",
                       sym, matched, len(all_links), company_name)
+            if matched == 0 and all_links:
+                sample = [l.get_text(strip=True) for l in all_links if len(l.get_text(strip=True)) >= 15][:5]
+                _log.info("DSE news[%s] sharenews24 sample headlines (no match found): %r", sym, sample)
         except Exception as e:  # noqa: BLE001
             _log.warning("DSE news[%s] sharenews24 fetch failed: %s", sym, e)
 
@@ -393,6 +396,9 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
                 status = getattr(resp, "status", "?")
                 html = resp.read().decode("utf-8", "replace")
             _log.info("DSE news[%s] stocknow.com.bd fetched: HTTP %s, %d bytes", sym, status, len(html))
+            if len(html) < 10000:
+                _log.info("DSE news[%s] stocknow.com.bd raw HTML sample (page is small — "
+                          "checking for JS-shell): %r", sym, html[:600])
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(html, "html.parser")
             all_links = soup.find_all("a", href=True)
@@ -442,6 +448,9 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
                     break
             _log.info("DSE news[%s] amarstock.com: %d/%d links matched %r",
                       sym, matched, len(all_links), company_name)
+            if matched == 0 and all_links:
+                sample = [l.get_text(strip=True) for l in all_links if len(l.get_text(strip=True)) >= 15][:5]
+                _log.info("DSE news[%s] amarstock.com sample headlines (no match found): %r", sym, sample)
         except Exception as e:  # noqa: BLE001
             _log.warning("DSE news[%s] amarstock.com fetch failed: %s", sym, e)
 
