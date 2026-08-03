@@ -273,12 +273,18 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
     out = []
     sym = symbol.upper()
     dsebd_archive_url = f"https://www.dsebd.org/news_archive.php?symbol={sym}"
+    # Cap per-source so no single bdshare feed (get_corporate_announcements
+    # alone can return 400+ rows) crowds out every other source before the
+    # link-bearing sites (sharenews24/stocknow/amarstock) get a turn.
+    _PER_SOURCE_CAP = 3
 
     def _add_rows(df, source):
         if df is None or df.empty:
             return 0
         n = 0
         for _, row in df.iterrows():
+            if n >= _PER_SOURCE_CAP:
+                break
             text = " | ".join(str(v) for v in row.values if str(v).strip())
             if text:
                 trimmed = text if len(text) <= 300 else text[:300].rstrip() + "…"
@@ -325,7 +331,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
 
     if not company_name:
         _log.info("DSE news[%s] skipping sharenews24 — no company name mapped for this ticker", sym)
-    elif len(out) < limit:
+    else:
         try:
             req = urllib.request.Request(
                 "https://sharenews24.com",
@@ -347,7 +353,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
                 full_link = href if href.startswith("http") else f"https://sharenews24.com{href}"
                 out.append({"title": title, "source": "sharenews24.com", "url": full_link})
                 matched += 1
-                if len(out) >= limit:
+                if matched >= _PER_SOURCE_CAP:
                     break
             _log.info("DSE news[%s] sharenews24: %d/%d links matched %r",
                       sym, matched, len(all_links), company_name)
@@ -362,7 +368,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
     # line distinguishes a real fetch failure from "page loaded, but the
     # actual headlines are injected by JS after load, so the raw HTML we
     # got has no <a> tags with real article text in them."
-    if company_name and len(out) < limit:
+    if company_name:
         try:
             req = urllib.request.Request(
                 "https://www.stocknow.com.bd/news",
@@ -384,7 +390,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
                 full_link = href if href.startswith("http") else f"https://www.stocknow.com.bd{href}"
                 out.append({"title": title, "source": "stocknow.com.bd", "url": full_link})
                 matched += 1
-                if len(out) >= limit:
+                if matched >= _PER_SOURCE_CAP:
                     break
             _log.info("DSE news[%s] stocknow.com.bd: %d/%d links matched %r (0 total links found "
                       "usually means JS-rendered content — see comment above)",
@@ -395,7 +401,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
     # amarstock.com/dse-news — same best-effort static-HTML approach as
     # sharenews24; unverified against the live site (not reachable from my
     # sandbox), so the log line is the only way to know if this worked.
-    if company_name and len(out) < limit:
+    if company_name:
         try:
             req = urllib.request.Request(
                 "https://www.amarstock.com/dse-news",
@@ -417,14 +423,21 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
                 full_link = href if href.startswith("http") else f"https://www.amarstock.com{href}"
                 out.append({"title": title, "source": "amarstock.com", "url": full_link})
                 matched += 1
-                if len(out) >= limit:
+                if matched >= _PER_SOURCE_CAP:
                     break
             _log.info("DSE news[%s] amarstock.com: %d/%d links matched %r",
                       sym, matched, len(all_links), company_name)
         except Exception as e:  # noqa: BLE001
             _log.warning("DSE news[%s] amarstock.com fetch failed: %s", sym, e)
 
-    return out[:limit]
+    # With 7 sources capped at _PER_SOURCE_CAP each, `out` can hold more
+    # than `limit` items — trim by preferring linked items first (a
+    # clickable article is more useful than a disclosure row pointing at
+    # the same generic archive page), then fill any remaining slots with
+    # the rest in the order they were collected.
+    linked = [item for item in out if item["url"] and "news_archive.php" not in item["url"]]
+    rest = [item for item in out if item not in linked]
+    return (linked + rest)[:limit]
 
 
 # Best-effort ticker -> common company name, needed because sharenews24.com
