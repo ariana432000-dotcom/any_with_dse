@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import io
 import logging
+import re
+import time as _time
 import urllib.request
 from datetime import datetime, timedelta
 
@@ -346,7 +348,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
     except Exception as e:  # noqa: BLE001
         _log.warning("DSE news[%s] get_corporate_announcements failed: %s", sym, e)
 
-    company_name = _DSE_COMPANY_NAMES.get(sym)
+    company_name = _load_dse_company_names().get(sym)
     _log.info("DSE news[%s] company_name lookup: %r", sym, company_name)
 
     try:
@@ -490,7 +492,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
 # (those match by code, not name); it just skips the sharenews24 pass and
 # falls back to code-matching against get_agm_news's company column, which
 # usually won't hit.
-_DSE_COMPANY_NAMES = {
+_DSE_COMPANY_NAMES_FALLBACK = {
     "SQURPHARMA": "Square Pharmaceuticals",
     "GP": "Grameenphone",
     "BEXIMCO": "Beximco",
@@ -501,7 +503,73 @@ _DSE_COMPANY_NAMES = {
     "BRACBANK": "BRAC Bank",
     "ISLAMIBANK": "Islami Bank",
     "LHBL": "LafargeHolcim Bangladesh",
+    "RANFOUNDRY": "Rangpur Foundry",
 }
+
+_DSE_COMPANY_NAMES_LIVE: dict[str, str] | None = None
+_DSE_COMPANY_NAMES_TS = 0.0
+_DSE_COMPANY_NAMES_TTL = 6 * 60 * 60  # names rarely change; matches the ticker-list cache TTL
+
+
+def _load_dse_company_names() -> dict[str, str]:
+    """✅ CHANGED: full ticker -> company-name map for ALL ~650 DSE-listed
+    companies, scraped once (then cached 6h) from dsebd.org's own company
+    directory — instead of relying on a small hand-typed dict that only
+    covers whichever tickers we happened to test (e.g. RANFOUNDRY had real
+    amarstock.com coverage the whole time; we just hadn't typed its name in
+    yet). The page lists entries as "TICKER (Full Company Name)" in plain
+    text, so this is parsed with one regex rather than depending on exact
+    table markup, which makes it more resilient to a page redesign.
+
+    _DSE_COMPANY_NAMES_FALLBACK's hand-verified names always win over the
+    parsed ones (applied last via .update()), and the whole fallback dict
+    is used outright if the live fetch fails for any reason — so a
+    dsebd.org outage degrades to "only the 11 verified tickers work",
+    never to a crash.
+    """
+    global _DSE_COMPANY_NAMES_LIVE, _DSE_COMPANY_NAMES_TS
+    now = _time.time()
+    if _DSE_COMPANY_NAMES_LIVE is not None and (now - _DSE_COMPANY_NAMES_TS) < _DSE_COMPANY_NAMES_TTL:
+        return _DSE_COMPANY_NAMES_LIVE
+
+    try:
+        req = urllib.request.Request(
+            "https://www.dsebd.org/company_listing.php",
+            headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
+        )
+        with _DSEBD_CONCURRENCY:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                html = resp.read().decode("utf-8", "replace")
+        from bs4 import BeautifulSoup
+        text = BeautifulSoup(html, "html.parser").get_text(" ")
+        pairs = re.findall(r"\b([A-Z][A-Z0-9]{1,15})\s*\(([^)]{3,80})\)", text)
+        mapping = {}
+        for ticker, name in pairs:
+            # Some company names contain their own parens, e.g. "RAK
+            # Ceramics (Bangladesh) Limited" — the regex above stops at the
+            # FIRST ")", so `name` here would be the truncated fragment
+            # "RAK Ceramics (Bangladesh" (dangling open paren and all).
+            # That fragment is a *worse* match target than just "RAK
+            # Ceramics", since a real headline is more likely to use the
+            # short name alone — so trim anything from the stray "(" on.
+            if "(" in name:
+                name = name.split("(")[0].strip()
+            if name:
+                mapping[ticker.strip()] = name
+        if len(mapping) < 100:  # real listing has ~650 entries — a much
+            # smaller count means the page structure likely changed and
+            # this regex isn't matching it correctly anymore; don't cache
+            # a broken partial result, fall through to the fallback dict.
+            raise ValueError(f"only parsed {len(mapping)} entries — page structure may have changed")
+        mapping.update(_DSE_COMPANY_NAMES_FALLBACK)
+        _DSE_COMPANY_NAMES_LIVE = mapping
+        _DSE_COMPANY_NAMES_TS = now
+        _log.info("Loaded %d DSE company names from dsebd.org's company listing.", len(mapping))
+        return mapping
+    except Exception as e:  # noqa: BLE001
+        _log.warning("Could not load DSE company name listing (%s); falling back to %d hardcoded names.",
+                     e, len(_DSE_COMPANY_NAMES_FALLBACK))
+        return dict(_DSE_COMPANY_NAMES_FALLBACK)
 
 
 def _parse_rss_titles(xml: str, limit: int):
