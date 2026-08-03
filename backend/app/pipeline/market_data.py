@@ -287,7 +287,7 @@ def _log_bdshare_news_functions_once() -> None:
         _log.warning("Could not introspect bdshare for diagnostics: %s", e)
 
 
-def _fetch_dse_news(symbol: str, limit: int = 8):
+def _fetch_dse_news(symbol: str, limit: int = 8, debug_sink: list | None = None):
     """DSE headlines from every bdshare feed + sharenews24.com.
 
     bdshare sources (matched by ticker code — reliable, structured, but no
@@ -306,7 +306,26 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
 
     Fails soft — any single source failing just means fewer results, never
     a crash, and never raises.
+
+    ✅ CHANGED: debug_sink, if given a list, receives every diagnostic line
+    this function already logs (via a temporary logging.Handler attached to
+    the module logger for the duration of this call) -- lets a debug API
+    route return the *same* diagnostics that would otherwise only be
+    visible in Railway's Deploy Logs, for when navigating that UI is the
+    actual blocker rather than the DSE-fetching logic itself.
     """
+    _debug_handler = None
+    if debug_sink is not None:
+        import logging as _logging
+
+        class _SinkHandler(_logging.Handler):
+            def emit(self, record):
+                debug_sink.append(f"{record.levelname}: {record.getMessage()}")
+
+        _debug_handler = _SinkHandler()
+        _log.addHandler(_debug_handler)
+        _log.setLevel(_logging.INFO)
+
     seen_titles = set()
     sym = symbol.upper()
     # urllib.parse.quote, not an f-string interpolation — some real DSE
@@ -627,6 +646,8 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             bucket = groups[src]
             if i < len(bucket):
                 merged.append(bucket[i])
+    if _debug_handler is not None:
+        _log.removeHandler(_debug_handler)
     return merged[:limit]
 
 
@@ -662,7 +683,7 @@ _DSE_COMPANY_NAMES_FALLBACK = {
 # the "sample headlines" log lines after deploying and correct any that
 # don't actually match real article text.
 _DSE_COMPANY_NAMES_BENGALI_FALLBACK = {
-    "SQURPHARMA": ["স্কয়ার ফার্মা", "স্কয়ার ফার্মাসিউটিক্যালস"],
+    "SQURPHARMA": ["স্কয়ার ফার্মা", "স্কয়ার ফার্মাসিউটিক্যালস", "স্কয়ার"],
     "GP": ["গ্রামীণফোন"],
     "BEXIMCO": ["বেক্সিমকো"],
     "RFL": ["আরএফএল"],
