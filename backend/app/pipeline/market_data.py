@@ -346,6 +346,38 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             n += 1
         return n
 
+    # ✅ CHANGED: sharenews24/stocknow/amarstock were matching headlines
+    # against the FULL fallback company name only (e.g. "Square
+    # Pharmaceuticals") -- these sites commonly use a shorter form ("Square
+    # Pharma") or drop the corporate suffix ("... Ltd"/"... PLC"), so an
+    # exact full-name substring check silently returns 0 matches even when
+    # the site has real coverage. This builds a small set of looser variants
+    # (full name, name minus a trailing corporate suffix, first two words,
+    # first word) and matches against any of them instead of just the one
+    # exact string.
+    def _company_name_variants(name: str) -> list[str]:
+        name = (name or "").strip()
+        if not name:
+            return []
+        variants = {name}
+        lname = name.lower()
+        for suffix in (" plc", " limited", " ltd", " ltd.", " co.", " company", " inc"):
+            if lname.endswith(suffix):
+                variants.add(name[: -len(suffix)].strip())
+        words = [w for w in re.split(r"\s+", name) if w.lower() != "the"]
+        if len(words) >= 2:
+            variants.add(" ".join(words[:2]))
+        if words:
+            variants.add(words[0])
+        # Keep the original full name regardless of length; drop derived
+        # variants under 4 chars (too generic, risks matching unrelated
+        # headlines).
+        return [v for v in variants if v == name or len(v) >= 4]
+
+    def _title_matches_company(title: str, variants: list[str]) -> bool:
+        t = title.lower()
+        return any(v.lower() in t for v in variants)
+
     try:
         from bdshare import get_all_news
         with _DSEBD_CONCURRENCY:
@@ -407,9 +439,10 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             all_links = soup.find_all("a", href=True)
             matched = 0
             bucket = groups["sharenews24.com"]
+            variants = _company_name_variants(company_name)
             for link in all_links:
                 title = link.get_text(strip=True)
-                if len(title) < 15 or company_name.lower() not in title.lower():
+                if len(title) < 15 or not _title_matches_company(title, variants):
                     continue
                 href = link["href"]
                 full_link = href if href.startswith("http") else f"https://sharenews24.com{href}"
@@ -417,8 +450,8 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
                 matched += 1
                 if matched >= PER_WEBSITE_CAP:
                     break
-            _log.info("DSE news[%s] sharenews24: %d/%d links matched %r",
-                      sym, matched, len(all_links), company_name)
+            _log.info("DSE news[%s] sharenews24: %d/%d links matched %r (variants tried: %r)",
+                      sym, matched, len(all_links), company_name, variants)
             if matched == 0 and all_links:
                 qualifying = [l.get_text(strip=True) for l in all_links if len(l.get_text(strip=True)) >= 15]
                 # first 5 links on a page are usually nav-menu chrome, not
@@ -456,9 +489,10 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             all_links = soup.find_all("a", href=True)
             matched = 0
             bucket = groups["stocknow.com.bd"]
+            variants = _company_name_variants(company_name)
             for link in all_links:
                 title = link.get_text(strip=True)
-                if len(title) < 15 or company_name.lower() not in title.lower():
+                if len(title) < 15 or not _title_matches_company(title, variants):
                     continue
                 href = link["href"]
                 full_link = href if href.startswith("http") else f"https://www.stocknow.com.bd{href}"
@@ -490,9 +524,10 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             all_links = soup.find_all("a", href=True)
             matched = 0
             bucket = groups["amarstock.com"]
+            variants = _company_name_variants(company_name)
             for link in all_links:
                 title = link.get_text(strip=True)
-                if len(title) < 15 or company_name.lower() not in title.lower():
+                if len(title) < 15 or not _title_matches_company(title, variants):
                     continue
                 href = link["href"]
                 full_link = href if href.startswith("http") else f"https://www.amarstock.com{href}"
