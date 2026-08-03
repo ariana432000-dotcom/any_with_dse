@@ -28,13 +28,46 @@ def _stooq_symbol(symbol: str, asset_type: str = "stock") -> str:
 def fetch_ohlcv(symbol: str, start: str, end: str, asset_type: str = "stock"):
     """Return a list of dict rows [{date,open,high,low,close,volume}], newest last.
 
+    ✅ CHANGED (DSE): a live DSE trading code routes to bdshare instead of
+    yfinance/Stooq, neither of which carry Dhaka Stock Exchange data. Same
+    row shape either way, so get_history()/get_quote()/compute_indicators()
+    in app/services/market_data.py need no changes to pick this up.
+
     Tries yfinance first (if installed), then Stooq's keyless CSV endpoint.
     Returns [] on failure rather than raising.
     """
+    from tradingagents.dataflows.symbol_utils import is_dse_ticker
+    if is_dse_ticker(symbol):
+        return _fetch_dse_ohlcv(symbol, start, end)
     rows = _fetch_yfinance(symbol, start, end)
     if rows:
         return rows
     return _fetch_stooq(symbol, start, end, asset_type)
+
+
+def _fetch_dse_ohlcv(symbol: str, start: str, end: str):
+    """DSE OHLCV via bdshare, reshaped to fetch_ohlcv's row contract. Fails
+    soft to [] — never raises, matching _fetch_yfinance/_fetch_stooq."""
+    try:
+        from bdshare import get_historical_data
+        df = get_historical_data(start, end, symbol.upper())
+    except Exception:  # noqa: BLE001
+        return []
+    if df is None or df.empty:
+        return []
+    df = df.sort_index(ascending=True).reset_index()
+    out = []
+    for _, r in df.iterrows():
+        try:
+            out.append({
+                "date": str(r["date"])[:10],
+                "open": float(r["open"]), "high": float(r["high"]),
+                "low": float(r["low"]), "close": float(r["close"]),
+                "volume": float(r["volume"]) if r.get("volume") not in (None, "") else None,
+            })
+        except Exception:  # noqa: BLE001
+            continue
+    return out
 
 
 def _fetch_yfinance(symbol, start, end):
@@ -195,6 +228,14 @@ def window_dates(end_date: str, days_back: int = 220):
 
 
 def fetch_recent_news(symbol: str, limit: int = 8):
+    """✅ CHANGED (DSE): a live DSE trading code routes to bdshare/
+    sharenews24 instead of Google News RSS, which returns nothing
+    meaningful for Dhaka-listed tickers. Same {title, source, url} row
+    shape either way."""
+    from tradingagents.dataflows.symbol_utils import is_dse_ticker
+    if is_dse_ticker(symbol):
+        return _fetch_dse_news(symbol, limit)
+
     """Real, keyless headlines via Google News RSS. Fails soft to []."""
     url = f"https://news.google.com/rss/search?q={urllib.parse.quote(symbol + ' stock')}&hl=en-US&gl=US&ceid=US:en"
     try:
@@ -204,6 +245,48 @@ def fetch_recent_news(symbol: str, limit: int = 8):
     except Exception:  # noqa: BLE001
         return []
     return _parse_rss_titles(xml, limit)
+
+
+def _fetch_dse_news(symbol: str, limit: int = 8):
+    """DSE headlines: bdshare's dsebd.org disclosures (no per-article URL —
+    these are corporate announcements, not linkable articles) plus
+    sharenews24.com keyword matches (real article URLs). Fails soft to [].
+    """
+    out = []
+    try:
+        from bdshare import get_all_news
+        df = get_all_news(code=symbol.upper())
+        if df is not None and not df.empty:
+            for _, row in df.head(limit).iterrows():
+                text = " | ".join(str(v) for v in row.values if str(v).strip())
+                if text:
+                    out.append({"title": text[:200], "source": "dsebd.org", "url": None})
+    except Exception:  # noqa: BLE001
+        pass
+
+    if len(out) < limit:
+        try:
+            req = urllib.request.Request(
+                "https://sharenews24.com",
+                headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                html = resp.read().decode("utf-8", "replace")
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+            for link in soup.find_all("a", href=True):
+                title = link.get_text(strip=True)
+                if len(title) < 15 or symbol.lower() not in title.lower():
+                    continue
+                href = link["href"]
+                full_link = href if href.startswith("http") else f"https://sharenews24.com{href}"
+                out.append({"title": title, "source": "sharenews24.com", "url": full_link})
+                if len(out) >= limit:
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+
+    return out[:limit]
 
 
 def _parse_rss_titles(xml: str, limit: int):
