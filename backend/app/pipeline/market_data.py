@@ -287,7 +287,7 @@ def _log_bdshare_news_functions_once() -> None:
         _log.warning("Could not introspect bdshare for diagnostics: %s", e)
 
 
-def _fetch_dse_news(symbol: str, limit: int = 8, debug_sink: list | None = None):
+def _fetch_dse_news(symbol: str, limit: int = 8):
     """DSE headlines from every bdshare feed + sharenews24.com.
 
     bdshare sources (matched by ticker code — reliable, structured, but no
@@ -306,26 +306,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8, debug_sink: list | None = None)
 
     Fails soft — any single source failing just means fewer results, never
     a crash, and never raises.
-
-    ✅ CHANGED: debug_sink, if given a list, receives every diagnostic line
-    this function already logs (via a temporary logging.Handler attached to
-    the module logger for the duration of this call) -- lets a debug API
-    route return the *same* diagnostics that would otherwise only be
-    visible in Railway's Deploy Logs, for when navigating that UI is the
-    actual blocker rather than the DSE-fetching logic itself.
     """
-    _debug_handler = None
-    if debug_sink is not None:
-        import logging as _logging
-
-        class _SinkHandler(_logging.Handler):
-            def emit(self, record):
-                debug_sink.append(f"{record.levelname}: {record.getMessage()}")
-
-        _debug_handler = _SinkHandler()
-        _log.addHandler(_debug_handler)
-        _log.setLevel(_logging.INFO)
-
     seen_titles = set()
     sym = symbol.upper()
     # urllib.parse.quote, not an f-string interpolation — some real DSE
@@ -486,86 +467,125 @@ def _fetch_dse_news(symbol: str, limit: int = 8, debug_sink: list | None = None)
     if not company_name:
         _log.info("DSE news[%s] skipping sharenews24 — no company name mapped for this ticker", sym)
     else:
-        try:
-            req = urllib.request.Request(
-                "https://sharenews24.com",
-                headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                status = getattr(resp, "status", "?")
-                html = resp.read().decode("utf-8", "replace")
-            _log.info("DSE news[%s] sharenews24 fetched: HTTP %s, %d bytes", sym, status, len(html))
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html, "html.parser")
-            all_links = soup.find_all("a", href=True)
-            matched = 0
-            bucket = groups["sharenews24.com"]
-            variants = all_name_variants
-            for link in all_links:
-                title = link.get_text(strip=True)
-                if len(title) < 15 or not _title_matches_company(title, variants):
-                    continue
-                href = link["href"]
-                full_link = href if href.startswith("http") else f"https://sharenews24.com{href}"
-                bucket.append({"title": title, "source": "sharenews24.com", "url": full_link})
-                matched += 1
-                if matched >= PER_WEBSITE_CAP:
-                    break
-            _log.info("DSE news[%s] sharenews24: %d/%d links matched %r (variants tried: %r)",
-                      sym, matched, len(all_links), company_name, variants)
-            if matched == 0 and all_links:
-                qualifying = [l.get_text(strip=True) for l in all_links if len(l.get_text(strip=True)) >= 15]
-                # first 5 links on a page are usually nav-menu chrome, not
-                # content — spread the sample across the whole list so we
-                # actually see what the article/content section looks like.
-                step = max(1, len(qualifying) // 15)
-                sample = qualifying[::step][:15]
-                _log.info("DSE news[%s] sharenews24 sample headlines (spread across page, no match found): %r", sym, sample)
-        except Exception as e:  # noqa: BLE001
-            _log.warning("DSE news[%s] sharenews24 fetch failed: %s", sym, e)
+        # ✅ CHANGED: the homepage mixes in politics/sports/entertainment
+        # (sharenews24 is a general newspaper, not stock-only), which
+        # drowns out company headlines and wastes most of the PER_WEBSITE_CAP
+        # matches on irrelevant links. Confirmed live (2026-08-02 fetch) that
+        # sharenews24.com has two dedicated category pages that are all but
+        # guaranteed to be stock-market content: শেয়ারবাজার (group/1) and
+        # প্রাইস সেনসেটিভ (group/17, price-sensitive disclosures — the exact
+        # kind of company-tagged headline dsebd.org itself carries, e.g.
+        # "আল-আরাফাহ্ ইসলামী ব্যাংকের দ্বিতীয় প্রান্তিক প্রকাশ"). Both are
+        # plain server-rendered HTML, same as the homepage — no JS needed.
+        sharenews24_pages = [
+            ("শেয়ারবাজার", "https://sharenews24.com/group/1/index.html"),
+            ("প্রাইস সেনসেটিভ", "https://sharenews24.com/group/17/index.html"),
+        ]
+        bucket = groups["sharenews24.com"]
+        variants = all_name_variants
+        matched_total = 0
+        links_seen_total = 0
+        no_match_samples: list[str] = []
+        for page_name, page_url in sharenews24_pages:
+            if matched_total >= PER_WEBSITE_CAP:
+                break
+            try:
+                req = urllib.request.Request(
+                    page_url,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    status = getattr(resp, "status", "?")
+                    html = resp.read().decode("utf-8", "replace")
+                _log.info("DSE news[%s] sharenews24[%s] fetched: HTTP %s, %d bytes", sym, page_name, status, len(html))
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(html, "html.parser")
+                all_links = soup.find_all("a", href=True)
+                links_seen_total += len(all_links)
+                page_matched = 0
+                for link in all_links:
+                    if matched_total >= PER_WEBSITE_CAP:
+                        break
+                    title = link.get_text(strip=True)
+                    if len(title) < 15:
+                        continue
+                    if not _title_matches_company(title, variants):
+                        if len(no_match_samples) < 15:
+                            no_match_samples.append(title)
+                        continue
+                    if title in seen_titles:
+                        continue
+                    seen_titles.add(title)
+                    href = link["href"]
+                    full_link = href if href.startswith("http") else f"https://sharenews24.com{href}"
+                    bucket.append({"title": title, "source": "sharenews24.com", "url": full_link})
+                    matched_total += 1
+                    page_matched += 1
+                _log.info("DSE news[%s] sharenews24[%s]: %d/%d links matched", sym, page_name, page_matched, len(all_links))
+            except Exception as e:  # noqa: BLE001
+                _log.warning("DSE news[%s] sharenews24[%s] fetch failed: %s", sym, page_name, e)
+        _log.info("DSE news[%s] sharenews24 total: %d/%d links matched %r (variants tried: %r)",
+                  sym, matched_total, links_seen_total, company_name, variants)
+        if matched_total == 0 and no_match_samples:
+            _log.info("DSE news[%s] sharenews24 sample headlines (no match found): %r", sym, no_match_samples)
 
-    # stocknow.com.bd — ⚠️ this site's news page is JS-rendered per
-    # DSE_VENDOR_README.md's own notes (a discover_stocknow_api.py tool was
-    # written to find the underlying data API but never wired in here). A
-    # plain requests+BeautifulSoup fetch below may legitimately come back
-    # with 0 matches even though the page "looks" like it loaded — the log
-    # line distinguishes a real fetch failure from "page loaded, but the
-    # actual headlines are injected by JS after load, so the raw HTML we
-    # got has no <a> tags with real article text in them."
+    # stocknow.com.bd — ✅ CHANGED: www.stocknow.com.bd/news is a JS SPA
+    # (confirmed live: a plain fetch returns an empty React shell with no
+    # article HTML at all — this is *why* this vendor always returned 0
+    # matches before, not a transient fetch issue). StockNow's actual
+    # editorial coverage lives on a SEPARATE subdomain, news.stocknow.com.bd
+    # — plain server-rendered HTML (confirmed live, no JS needed), with real
+    # <a href> article links whose slugs often already carry the company
+    # name (e.g. "national-credit-and-commerce-bank-limited-2"). Pointing
+    # the fetch at the right host is the actual fix here — discover_stocknow_api.py's
+    # Playwright route was solving a problem this subdomain doesn't have.
     if company_name:
-        try:
-            req = urllib.request.Request(
-                "https://www.stocknow.com.bd/news",
-                headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                status = getattr(resp, "status", "?")
-                html = resp.read().decode("utf-8", "replace")
-            _log.info("DSE news[%s] stocknow.com.bd fetched: HTTP %s, %d bytes", sym, status, len(html))
-            if len(html) < 10000:
-                _log.info("DSE news[%s] stocknow.com.bd raw HTML sample (page is small — "
-                          "checking for JS-shell): %r", sym, html[:600])
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html, "html.parser")
-            all_links = soup.find_all("a", href=True)
-            matched = 0
-            bucket = groups["stocknow.com.bd"]
-            variants = _company_name_variants(company_name)
-            for link in all_links:
-                title = link.get_text(strip=True)
-                if len(title) < 15 or not _title_matches_company(title, variants):
-                    continue
-                href = link["href"]
-                full_link = href if href.startswith("http") else f"https://www.stocknow.com.bd{href}"
-                bucket.append({"title": title, "source": "stocknow.com.bd", "url": full_link})
-                matched += 1
-                if matched >= PER_WEBSITE_CAP:
-                    break
-            _log.info("DSE news[%s] stocknow.com.bd: %d/%d links matched %r (0 total links found "
-                      "usually means JS-rendered content — see comment above)",
-                      sym, matched, len(all_links), company_name)
-        except Exception as e:  # noqa: BLE001
-            _log.warning("DSE news[%s] stocknow.com.bd fetch failed: %s", sym, e)
+        stocknow_pages = [
+            ("home", "https://news.stocknow.com.bd/"),
+            # কোম্পানি সংবাদ (company news) category — broader net than the
+            # homepage alone, since the homepage only shows ~15 most recent
+            # posts across ALL categories (national/international/sports too).
+            ("কোম্পানি সংবাদ", "https://news.stocknow.com.bd/category/%e0%a6%95%e0%a7%8b%e0%a6%ae%e0%a7%8d%e0%a6%aa%e0%a6%be%e0%a6%a8%e0%a6%bf-%e0%a6%b8%e0%a6%82%e0%a6%ac%e0%a6%be%e0%a6%a6/"),
+        ]
+        bucket = groups["stocknow.com.bd"]
+        variants = all_name_variants
+        matched_total = 0
+        links_seen_total = 0
+        for page_name, page_url in stocknow_pages:
+            if matched_total >= PER_WEBSITE_CAP:
+                break
+            try:
+                req = urllib.request.Request(
+                    page_url,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    status = getattr(resp, "status", "?")
+                    html = resp.read().decode("utf-8", "replace")
+                _log.info("DSE news[%s] news.stocknow.com.bd[%s] fetched: HTTP %s, %d bytes", sym, page_name, status, len(html))
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(html, "html.parser")
+                all_links = soup.find_all("a", href=True)
+                links_seen_total += len(all_links)
+                page_matched = 0
+                for link in all_links:
+                    if matched_total >= PER_WEBSITE_CAP:
+                        break
+                    title = link.get_text(strip=True)
+                    if len(title) < 15 or not _title_matches_company(title, variants):
+                        continue
+                    if title in seen_titles:
+                        continue
+                    seen_titles.add(title)
+                    href = link["href"]
+                    full_link = href if href.startswith("http") else f"https://news.stocknow.com.bd{href}"
+                    bucket.append({"title": title, "source": "stocknow.com.bd", "url": full_link})
+                    matched_total += 1
+                    page_matched += 1
+                _log.info("DSE news[%s] news.stocknow.com.bd[%s]: %d/%d links matched", sym, page_name, page_matched, len(all_links))
+            except Exception as e:  # noqa: BLE001
+                _log.warning("DSE news[%s] news.stocknow.com.bd[%s] fetch failed: %s", sym, page_name, e)
+        _log.info("DSE news[%s] stocknow.com.bd total: %d/%d links matched %r", sym, matched_total, links_seen_total, company_name)
 
     # amarstock.com/dse-news — same best-effort static-HTML approach as
     # sharenews24; unverified against the live site (not reachable from my
@@ -646,8 +666,6 @@ def _fetch_dse_news(symbol: str, limit: int = 8, debug_sink: list | None = None)
             bucket = groups[src]
             if i < len(bucket):
                 merged.append(bucket[i])
-    if _debug_handler is not None:
-        _log.removeHandler(_debug_handler)
     return merged[:limit]
 
 
@@ -683,7 +701,7 @@ _DSE_COMPANY_NAMES_FALLBACK = {
 # the "sample headlines" log lines after deploying and correct any that
 # don't actually match real article text.
 _DSE_COMPANY_NAMES_BENGALI_FALLBACK = {
-    "SQURPHARMA": ["স্কয়ার ফার্মা", "স্কয়ার ফার্মাসিউটিক্যালস", "স্কয়ার"],
+    "SQURPHARMA": ["স্কয়ার ফার্মা", "স্কয়ার ফার্মাসিউটিক্যালস"],
     "GP": ["গ্রামীণফোন"],
     "BEXIMCO": ["বেক্সিমকো"],
     "RFL": ["আরএফএল"],
@@ -694,6 +712,7 @@ _DSE_COMPANY_NAMES_BENGALI_FALLBACK = {
     "ISLAMIBANK": ["ইসলামী ব্যাংক"],
     "LHBL": ["লাফার্জহোলসিম"],
     "RANFOUNDRY": ["রংপুর ফাউন্ড্রি"],
+    "ABBANK": ["এবি ব্যাংক"],
 }
 
 _DSE_COMPANY_NAMES_LIVE: dict[str, str] | None = None
