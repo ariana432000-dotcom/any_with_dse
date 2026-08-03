@@ -287,7 +287,10 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
     out = []
     seen_titles = set()
     sym = symbol.upper()
-    dsebd_archive_url = f"https://www.dsebd.org/news_archive.php?symbol={sym}"
+    # urllib.parse.quote, not an f-string interpolation — some real DSE
+    # tickers contain parentheses (e.g. AMCL(PRAN)), which break Markdown
+    # link syntax if dropped into a URL unescaped.
+    dsebd_archive_url = f"https://www.dsebd.org/news_archive.php?symbol={urllib.parse.quote(sym)}"
     import re
     _sym_pattern = re.compile(rf"\b{re.escape(sym)}\b")
     # Cap per-source so no single bdshare feed (get_corporate_announcements
@@ -357,7 +360,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             df = get_agm_news()
         if df is not None and not df.empty and "company" in df.columns:
             needle = (company_name or sym).lower()
-            mask = df["company"].astype(str).str.lower().str.contains(needle, na=False)
+            mask = df["company"].astype(str).str.lower().str.contains(needle, regex=False, na=False)
             n = _add_rows(df[mask], "dsebd.org (AGM/dividend)")
             _log.info("DSE news[%s] get_agm_news: %d/%d rows matched %r", sym, n, len(df), needle)
         else:
@@ -394,8 +397,13 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             _log.info("DSE news[%s] sharenews24: %d/%d links matched %r",
                       sym, matched, len(all_links), company_name)
             if matched == 0 and all_links:
-                sample = [l.get_text(strip=True) for l in all_links if len(l.get_text(strip=True)) >= 15][:5]
-                _log.info("DSE news[%s] sharenews24 sample headlines (no match found): %r", sym, sample)
+                qualifying = [l.get_text(strip=True) for l in all_links if len(l.get_text(strip=True)) >= 15]
+                # first 5 links on a page are usually nav-menu chrome, not
+                # content — spread the sample across the whole list so we
+                # actually see what the article/content section looks like.
+                step = max(1, len(qualifying) // 15)
+                sample = qualifying[::step][:15]
+                _log.info("DSE news[%s] sharenews24 sample headlines (spread across page, no match found): %r", sym, sample)
         except Exception as e:  # noqa: BLE001
             _log.warning("DSE news[%s] sharenews24 fetch failed: %s", sym, e)
 
@@ -470,8 +478,10 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             _log.info("DSE news[%s] amarstock.com: %d/%d links matched %r",
                       sym, matched, len(all_links), company_name)
             if matched == 0 and all_links:
-                sample = [l.get_text(strip=True) for l in all_links if len(l.get_text(strip=True)) >= 15][:5]
-                _log.info("DSE news[%s] amarstock.com sample headlines (no match found): %r", sym, sample)
+                qualifying = [l.get_text(strip=True) for l in all_links if len(l.get_text(strip=True)) >= 15]
+                step = max(1, len(qualifying) // 15)
+                sample = qualifying[::step][:15]
+                _log.info("DSE news[%s] amarstock.com sample headlines (spread across page, no match found): %r", sym, sample)
         except Exception as e:  # noqa: BLE001
             _log.warning("DSE news[%s] amarstock.com fetch failed: %s", sym, e)
 
@@ -533,13 +543,15 @@ def _load_dse_company_names() -> dict[str, str]:
         return _DSE_COMPANY_NAMES_LIVE
 
     try:
-        req = urllib.request.Request(
-            "https://www.dsebd.org/company_listing.php",
-            headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
-        )
+        import requests as _requests
         with _DSEBD_CONCURRENCY:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                html = resp.read().decode("utf-8", "replace")
+            resp = _requests.get(
+                "https://www.dsebd.org/company_listing.php",
+                headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            html = resp.text
         from bs4 import BeautifulSoup
         text = BeautifulSoup(html, "html.parser").get_text(" ")
         pairs = re.findall(r"\b([A-Z][A-Z0-9]{1,15})\s*\(([^)]{3,80})\)", text)
