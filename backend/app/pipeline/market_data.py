@@ -19,6 +19,17 @@ from datetime import datetime, timedelta
 
 _log = logging.getLogger(__name__)
 
+# Watchlist polling can fetch several DSE tickers concurrently (each via
+# asyncio.to_thread -> a real OS thread), and every one of them calls
+# bdshare -> dsebd.org. urllib3's default connection pool (size 10) can't
+# hold that many at once, producing repeated "Connection pool is full,
+# discarding connection: dsebd.org" warnings. This throttles our own calls
+# so we never have more than a few in flight at once — cheaper and more
+# reliable than trying to reconfigure bdshare's internal session, which we
+# don't control.
+import threading
+_DSEBD_CONCURRENCY = threading.Semaphore(3)
+
 
 def _stooq_symbol(symbol: str, asset_type: str = "stock") -> str:
     s = symbol.strip().lower()
@@ -53,7 +64,8 @@ def _fetch_dse_ohlcv(symbol: str, start: str, end: str):
     soft to [] — never raises, matching _fetch_yfinance/_fetch_stooq."""
     try:
         from bdshare import get_historical_data
-        df = get_historical_data(start, end, symbol.upper())
+        with _DSEBD_CONCURRENCY:
+            df = get_historical_data(start, end, symbol.upper())
     except Exception:  # noqa: BLE001
         return []
     if df is None or df.empty:
@@ -309,21 +321,27 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
 
     try:
         from bdshare import get_all_news
-        n = _add_rows(get_all_news(code=sym), "dsebd.org")
+        with _DSEBD_CONCURRENCY:
+            df_all = get_all_news(code=sym)
+        n = _add_rows(df_all, "dsebd.org")
         _log.info("DSE news[%s] get_all_news: %d rows", sym, n)
     except Exception as e:  # noqa: BLE001
         _log.warning("DSE news[%s] get_all_news failed: %s", sym, e)
 
     try:
         from bdshare import get_price_sensitive_news
-        n = _add_rows(get_price_sensitive_news(code=sym), "dsebd.org (price-sensitive)")
+        with _DSEBD_CONCURRENCY:
+            df_psn = get_price_sensitive_news(code=sym)
+        n = _add_rows(df_psn, "dsebd.org (price-sensitive)")
         _log.info("DSE news[%s] get_price_sensitive_news: %d rows", sym, n)
     except Exception as e:  # noqa: BLE001
         _log.warning("DSE news[%s] get_price_sensitive_news failed: %s", sym, e)
 
     try:
         from bdshare import get_corporate_announcements
-        n = _add_rows(get_corporate_announcements(code=sym), "dsebd.org (corporate)")
+        with _DSEBD_CONCURRENCY:
+            df_corp = get_corporate_announcements(code=sym)
+        n = _add_rows(df_corp, "dsebd.org (corporate)")
         _log.info("DSE news[%s] get_corporate_announcements: %d rows", sym, n)
     except Exception as e:  # noqa: BLE001
         _log.warning("DSE news[%s] get_corporate_announcements failed: %s", sym, e)
@@ -333,7 +351,8 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
 
     try:
         from bdshare import get_agm_news
-        df = get_agm_news()
+        with _DSEBD_CONCURRENCY:
+            df = get_agm_news()
         if df is not None and not df.empty and "company" in df.columns:
             needle = (company_name or sym).lower()
             mask = df["company"].astype(str).str.lower().str.contains(needle, na=False)
