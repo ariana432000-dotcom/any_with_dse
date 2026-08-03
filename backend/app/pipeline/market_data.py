@@ -271,14 +271,25 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
     a crash, and never raises.
     """
     out = []
+    seen_titles = set()
     sym = symbol.upper()
     dsebd_archive_url = f"https://www.dsebd.org/news_archive.php?symbol={sym}"
+    import re
+    _sym_pattern = re.compile(rf"\b{re.escape(sym)}\b")
     # Cap per-source so no single bdshare feed (get_corporate_announcements
     # alone can return 400+ rows) crowds out every other source before the
     # link-bearing sites (sharenews24/stocknow/amarstock) get a turn.
     _PER_SOURCE_CAP = 3
 
     def _add_rows(df, source):
+        """✅ CHANGED: get_price_sensitive_news/get_corporate_announcements
+        accept a code= filter but DSE's own server ignores it for these two
+        categories (confirmed live: ABBANK's feed returned EXCH/EIL/IPDC
+        items unrelated to ABBANK) — so every row is re-checked here for an
+        actual \\bTICKER\\b match before being kept, regardless of which
+        bdshare call it came from. Also dedupes by title text, since price-
+        sensitive and corporate turned out to be near-identical unfiltered
+        feeds."""
         if df is None or df.empty:
             return 0
         n = 0
@@ -286,10 +297,14 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             if n >= _PER_SOURCE_CAP:
                 break
             text = " | ".join(str(v) for v in row.values if str(v).strip())
-            if text:
-                trimmed = text if len(text) <= 300 else text[:300].rstrip() + "…"
-                out.append({"title": trimmed, "source": source, "url": dsebd_archive_url})
-                n += 1
+            if not text or not _sym_pattern.search(text.upper()):
+                continue
+            if text in seen_titles:
+                continue
+            seen_titles.add(text)
+            trimmed = text if len(text) <= 300 else text[:300].rstrip() + "…"
+            out.append({"title": trimmed, "source": source, "url": dsebd_archive_url})
+            n += 1
         return n
 
     try:
