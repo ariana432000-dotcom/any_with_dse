@@ -290,7 +290,16 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
     # urllib.parse.quote, not an f-string interpolation — some real DSE
     # tickers contain parentheses (e.g. AMCL(PRAN)), which break Markdown
     # link syntax if dropped into a URL unescaped.
-    dsebd_archive_url = f"https://www.dsebd.org/news_archive.php?symbol={urllib.parse.quote(sym)}"
+    # ✅ CHANGED: news_archive.php?symbol= was the wrong page — confirmed
+    # against the live site. bdshare's own DSE_NEWS_URL constant (what
+    # get_all_news/get_price_sensitive_news/get_corporate_announcements
+    # actually fetch under the hood) is old_news.php with inst/criteria/
+    # archive params — this now points users at the same page our own
+    # data is sourced from.
+    dsebd_archive_url = (
+        f"https://www.dsebd.org/old_news.php"
+        f"?inst={urllib.parse.quote(sym)}&criteria=3&archive=news"
+    )
     import re
     _sym_pattern = re.compile(rf"\b{re.escape(sym)}\b")
     # Cap per-source so no single bdshare feed (get_corporate_announcements
@@ -544,14 +553,32 @@ def _load_dse_company_names() -> dict[str, str]:
 
     try:
         import requests as _requests
-        with _DSEBD_CONCURRENCY:
-            resp = _requests.get(
-                "https://www.dsebd.org/company_listing.php",
-                headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            html = resp.text
+        # ✅ CHANGED: dsebd.org's own certificate chain appears to be
+        # genuinely broken (confirmed: fails from both a local machine and
+        # from Railway, via both urllib and requests). bdshare's calls only
+        # "succeed" because it automatically falls back to the alternate
+        # host (dse.com.bd) whenever the primary fails for any reason,
+        # SSL errors included — that fallback, not a different HTTP
+        # library, is what actually made the difference. Replicating it
+        # here instead of just retrying the same broken host.
+        html = None
+        last_exc = None
+        for host in ("https://www.dsebd.org", "https://dse.com.bd"):
+            try:
+                with _DSEBD_CONCURRENCY:
+                    resp = _requests.get(
+                        f"{host}/company_listing.php",
+                        headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
+                        timeout=15,
+                    )
+                    resp.raise_for_status()
+                    html = resp.text
+                break
+            except Exception as e:  # noqa: BLE001
+                last_exc = e
+                continue
+        if html is None:
+            raise last_exc or RuntimeError("both dsebd.org and dse.com.bd failed")
         from bs4 import BeautifulSoup
         text = BeautifulSoup(html, "html.parser").get_text(" ")
         pairs = re.findall(r"\b([A-Z][A-Z0-9]{1,15})\s*\(([^)]{3,80})\)", text)
