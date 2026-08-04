@@ -287,6 +287,43 @@ def _log_bdshare_news_functions_once() -> None:
         _log.warning("Could not introspect bdshare for diagnostics: %s", e)
 
 
+# ✅ CHANGED: sharenews24/stocknow/amarstock were matching headlines against
+# the FULL fallback company name only (e.g. "Square Pharmaceuticals") --
+# these sites commonly use a shorter form ("Square Pharma") or drop the
+# corporate suffix ("... Ltd"/"... PLC"), so an exact full-name substring
+# check silently returns 0 matches even when the site has real coverage.
+# This builds a small set of looser variants (full name, name minus a
+# trailing corporate suffix, first two words, first word) and matches
+# against any of them instead of just the one exact string.
+#
+# ✅ Module-level (not a closure inside _fetch_dse_news) so dse_news.py's
+# TradingAgents-pipeline implementation can reuse the exact same matching
+# logic instead of re-implementing (and re-diverging from) it.
+def _company_name_variants(name: str) -> list[str]:
+    name = (name or "").strip()
+    if not name:
+        return []
+    variants = {name}
+    lname = name.lower()
+    for suffix in (" plc", " limited", " ltd", " ltd.", " co.", " company", " inc"):
+        if lname.endswith(suffix):
+            variants.add(name[: -len(suffix)].strip())
+    words = [w for w in re.split(r"\s+", name) if w.lower() != "the"]
+    if len(words) >= 2:
+        variants.add(" ".join(words[:2]))
+    if words:
+        variants.add(words[0])
+    # Keep the original full name regardless of length; drop derived
+    # variants under 4 chars (too generic, risks matching unrelated
+    # headlines).
+    return [v for v in variants if v == name or len(v) >= 4]
+
+
+def _title_matches_company(title: str, variants: list[str]) -> bool:
+    t = title.lower()
+    return any(v.lower() in t for v in variants)
+
+
 def _fetch_dse_news(symbol: str, limit: int = 8):
     """DSE headlines from every bdshare feed + sharenews24.com.
 
@@ -323,7 +360,14 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
         f"?inst={urllib.parse.quote(sym)}&criteria=3&archive=news"
     )
     import re
-    _sym_pattern = re.compile(rf"\b{re.escape(sym)}\b")
+    # ✅ FIXED: \b...\b silently never matches for tickers that start/end in
+    # a non-word character (e.g. "AMCL(PRAN)" — \b requires a word<->non-word
+    # transition, and the character after the escaped trailing ")" in real
+    # text is *also* non-word, so no boundary ever exists there). Using an
+    # explicit "not adjacent to another alnum char" lookaround instead of \b
+    # gives the same anti-false-positive behavior (won't match "GP" inside
+    # "GPHISPAT") while actually working for punctuation-containing tickers.
+    _sym_pattern = re.compile(rf"(?<![A-Z0-9]){re.escape(sym)}(?![A-Z0-9])")
 
     # ✅ CHANGED: capped and grouped per *website*, not per bdshare feed.
     # dsebd.org alone has 4 sub-feeds (get_all_news, price-sensitive,
@@ -341,16 +385,26 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
         "amarstock.com": [],
     }
 
-    def _add_rows(df, source_label, group="dsebd.org"):
+    def _add_rows(df, source_label, group="dsebd.org", require_symbol_match=True):
         """✅ CHANGED: get_price_sensitive_news/get_corporate_announcements
         accept a code= filter but DSE's own server ignores it for these two
         categories (confirmed live: ABBANK's feed returned EXCH/EIL/IPDC
         items unrelated to ABBANK) — so every row is re-checked here for an
-        actual \\bTICKER\\b match before being kept, regardless of which
-        bdshare call it came from. Also dedupes by title text, since price-
-        sensitive and corporate turned out to be near-identical unfiltered
-        feeds. `group` buckets all 4 dsebd sub-feeds into one shared,
-        capped list (see PER_WEBSITE_CAP note above)."""
+        actual ticker match before being kept, regardless of which bdshare
+        call it came from. Also dedupes by title text, since price-sensitive
+        and corporate turned out to be near-identical unfiltered feeds.
+        `group` buckets all 4 dsebd sub-feeds into one shared, capped list
+        (see PER_WEBSITE_CAP note above).
+
+        ✅ FIXED: get_agm_news()'s rows have NO ticker/code column at all —
+        only company/yearEnd/dividend/agmDate/recordDate/venue/time — so the
+        \bTICKER\b re-check below can never match those rows (a raw code
+        like "SQURPHARMA" doesn't appear verbatim in a dividend/date value).
+        Applying it there silently zeroed out the AGM feed unconditionally,
+        even after the caller had already correctly filtered by company
+        name. `require_symbol_match=False` lets the AGM call site opt out of
+        this second, doomed-to-fail filter since it already did its own
+        (correct) company-name filtering before calling in here."""
         bucket = groups[group]
         if df is None or df.empty:
             return 0
@@ -359,7 +413,9 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             if len(bucket) >= PER_WEBSITE_CAP:
                 break
             text = " | ".join(str(v) for v in row.values if str(v).strip())
-            if not text or not _sym_pattern.search(text.upper()):
+            if not text:
+                continue
+            if require_symbol_match and not _sym_pattern.search(text.upper()):
                 continue
             if text in seen_titles:
                 continue
@@ -368,38 +424,6 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             bucket.append({"title": trimmed, "source": source_label, "url": dsebd_archive_url})
             n += 1
         return n
-
-    # ✅ CHANGED: sharenews24/stocknow/amarstock were matching headlines
-    # against the FULL fallback company name only (e.g. "Square
-    # Pharmaceuticals") -- these sites commonly use a shorter form ("Square
-    # Pharma") or drop the corporate suffix ("... Ltd"/"... PLC"), so an
-    # exact full-name substring check silently returns 0 matches even when
-    # the site has real coverage. This builds a small set of looser variants
-    # (full name, name minus a trailing corporate suffix, first two words,
-    # first word) and matches against any of them instead of just the one
-    # exact string.
-    def _company_name_variants(name: str) -> list[str]:
-        name = (name or "").strip()
-        if not name:
-            return []
-        variants = {name}
-        lname = name.lower()
-        for suffix in (" plc", " limited", " ltd", " ltd.", " co.", " company", " inc"):
-            if lname.endswith(suffix):
-                variants.add(name[: -len(suffix)].strip())
-        words = [w for w in re.split(r"\s+", name) if w.lower() != "the"]
-        if len(words) >= 2:
-            variants.add(" ".join(words[:2]))
-        if words:
-            variants.add(words[0])
-        # Keep the original full name regardless of length; drop derived
-        # variants under 4 chars (too generic, risks matching unrelated
-        # headlines).
-        return [v for v in variants if v == name or len(v) >= 4]
-
-    def _title_matches_company(title: str, variants: list[str]) -> bool:
-        t = title.lower()
-        return any(v.lower() in t for v in variants)
 
     _log_bdshare_news_functions_once()
 
@@ -454,7 +478,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
         if df is not None and not df.empty and "company" in df.columns:
             needle = (company_name or sym).lower()
             mask = df["company"].astype(str).str.lower().str.contains(needle, regex=False, na=False)
-            n = _add_rows(df[mask], "dsebd.org (AGM/dividend)")
+            n = _add_rows(df[mask], "dsebd.org (AGM/dividend)", require_symbol_match=False)
             _log.info("DSE news[%s] get_agm_news: %d/%d rows matched %r", sym, n, len(df), needle)
         else:
             _log.info("DSE news[%s] get_agm_news: empty or no 'company' column", sym)
@@ -702,21 +726,28 @@ def _load_dse_company_names() -> dict[str, str]:
         return _DSE_COMPANY_NAMES_LIVE
 
     try:
-        import requests as _requests
-        # ✅ CHANGED: dsebd.org's own certificate chain appears to be
-        # genuinely broken (confirmed: fails from both a local machine and
-        # from Railway, via both urllib and requests). bdshare's calls only
-        # "succeed" because it automatically falls back to the alternate
-        # host (dse.com.bd) whenever the primary fails for any reason,
-        # SSL errors included — that fallback, not a different HTTP
-        # library, is what actually made the difference. Replicating it
-        # here instead of just retrying the same broken host.
+        # ✅ FIXED: dsebd.org's cert chain is missing an intermediate
+        # (Sectigo DV R36) — that's the actual root cause, and bdshare's own
+        # fix is bundling that intermediate into its shared requests.Session
+        # (bdshare.util.helper._session, .verify = certifi + the missing
+        # intermediate), not primarily "try a different host." The dual-host
+        # fallback in bdshare's _request() is a separate, orthogonal retry
+        # mechanism. The previous version of this function used a fresh
+        # requests.get() (default certifi bundle, no added intermediate) for
+        # BOTH hosts — if dse.com.bd shares the same incomplete chain as
+        # dsebd.org (unverified, plausible), both attempts fail identically
+        # and this silently degrades to the 11-ticker hardcoded fallback
+        # every time, with no error surfaced. Reusing bdshare's own patched
+        # session fixes the cert problem at its actual source regardless of
+        # which host is hit, while the host loop remains as a genuine
+        # fallback for real outages (not cert issues).
+        from bdshare.util.helper import _session as _bdshare_session
         html = None
         last_exc = None
         for host in ("https://www.dsebd.org", "https://dse.com.bd"):
             try:
                 with _DSEBD_CONCURRENCY:
-                    resp = _requests.get(
+                    resp = _bdshare_session.get(
                         f"{host}/company_listing.php",
                         headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
                         timeout=15,
