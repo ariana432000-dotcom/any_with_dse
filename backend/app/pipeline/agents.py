@@ -148,6 +148,26 @@ def create_fundamentals_analyst(llm, log=print):
                             break
             return results
 
+        def extract_dict_numbers(raw, keys):
+            """dse_statement_extractor.get_statement() returns a Python dict,
+            which `str(tool_fn.invoke(args))` turns into a *single-line* repr
+            (no newlines) -- unlike yfinance's DataFrame str() output, which
+            is naturally one row per line. extract_numbers() above scans
+            "per line" and grabs whichever large number appears first on that
+            line; on a single-line dict repr that means every key would
+            silently resolve to the SAME number instead of honestly showing
+            N/A. Anchor directly on `'key': value` so each key only ever
+            matches its own value."""
+            results = {}
+            for key in keys:
+                m = re.search(rf"['\"]{re.escape(key)}['\"]\s*:\s*(-?[\d.]+)", raw)
+                if m:
+                    try:
+                        results[key] = float(m.group(1))
+                    except ValueError:
+                        continue
+            return results
+
         def fmt(n):
             try:
                 n = float(n)
@@ -168,22 +188,104 @@ def create_fundamentals_analyst(llm, log=print):
             m = re.search(pattern, raw)
             return m.group(1) if m else "N/A"
 
-        pe_val = g(r"PE Ratio.*?:\s*([\d.]+)", fund)
-        eps_val = g(r"EPS \(TTM\).*?:\s*([\d.]+)", fund)
-        mcap = re.search(r"Market Cap.*?:\s*([\d.]+)", fund)
-        rev_ttm = re.search(r"Revenue \(TTM\).*?:\s*([\d.]+)", fund)
-        mcap_val = fmt(mcap.group(1)) if mcap else "N/A"
-        rev_val = fmt(rev_ttm.group(1)) if rev_ttm else "N/A"
-        beta_val = g(r"Beta.*?:\s*([\d.]+)", fund)
-        div_val = g(r"Dividend Yield.*?:\s*([\d.]+)", fund)
-        hi52_val = g(r"52 Week High.*?:\s*([\d.]+)", fund)
-        lo52_val = g(r"52 Week Low.*?:\s*([\d.]+)", fund)
-        sma50_val = g(r"50 Day Average.*?:\s*([\d.]+)", fund)
+        from tradingagents.dataflows.symbol_utils import is_dse_ticker
 
-        inc_rows = extract_numbers(inc, ["Total Revenue", "Gross Profit", "Operating Income",
-                                         "Net Income From Continuing", "Normalized EBITDA"])
-        cf_rows = extract_numbers(cf, ["Free Cash Flow", "Repurchase Of Capital Stock"])
-        bs_rows = extract_numbers(bs, ["Net Debt", "Total Debt", "Cash And Cash Equivalents"])
+        if is_dse_ticker(company):
+            # ✅ FIXED: dsebd.org's snapshot (dse_fundamentals.py) and the
+            # PDF-extracted statements (dse_statement_extractor.py) use their
+            # own label/key conventions, not yfinance/Alpha Vantage's. The
+            # fixed regex patterns in the `else` branch below (e.g. "PE Ratio",
+            # "Market Cap", "Total Revenue") never matched DSE output, so
+            # every field silently fell back to "N/A" for BD tickers. This
+            # branch parses the actual DSE formats instead of assuming a
+            # US-vendor shape.
+
+            def g_dse(keywords, raw, exclude=()):
+                """Scan the DSE snapshot's `Label: Value` lines for a keyword
+                substring (mirrors the same keyword-matching dse_fundamentals.py
+                itself uses to pick fields off dsebd.org, since dsebd.org's
+                exact label wording isn't guaranteed / can drift) and pull the
+                first number out of that line."""
+                for line in raw.split("\n"):
+                    low = line.lower()
+                    if any(k in low for k in keywords) and not any(e in low for e in exclude):
+                        m = re.search(r"(-?[\d,]+\.?\d*)", line.split(":", 1)[-1])
+                        if m:
+                            return m.group(1).replace(",", "")
+                return "N/A"
+
+            pe_val = g_dse(["pe(x)", "p/e"], fund)
+            eps_val = g_dse(["eps"], fund, exclude=("change",))
+            mcap_val = g_dse(["market capitalization", "market cap"], fund)
+            div_val = g_dse(["dividend"], fund)
+            # Not published on the DSE snapshot page at all -- left N/A
+            # rather than guessed, per the "never invent data" rule below.
+            rev_val = "N/A"
+            beta_val = "N/A"
+            hi52_val = "N/A"
+            lo52_val = "N/A"
+            sma50_val = "N/A"
+
+            # dse_statement_extractor.py returns an Alpha-Vantage-*shaped*
+            # dict but with its own camelCase keys (see STATEMENT_SCHEMAS) --
+            # "Total Revenue" etc. never existed in that JSON, so
+            # extract_numbers was searching for the wrong keys entirely.
+            # Net Debt / Free Cash Flow aren't literal fields in the DSE
+            # schema at all, so derive them from the fields that are
+            # (long+short term debt; operating cash flow minus capex).
+            inc_rows = extract_dict_numbers(inc, ["totalRevenue", "grossProfit", "operatingIncome",
+                                                  "netIncome", "ebitda"])
+            cf_rows = extract_dict_numbers(cf, ["operatingCashflow", "capitalExpenditures"])
+            bs_rows = extract_dict_numbers(bs, ["longTermDebt", "shortTermDebt", "cashAndCashEquivalents"])
+
+            net_income_val = fmt(inc_rows.get("netIncome", "N/A"))
+            gross_profit_val = fmt(inc_rows.get("grossProfit", "N/A"))
+            operating_income_val = fmt(inc_rows.get("operatingIncome", "N/A"))
+            ebitda_val = fmt(inc_rows.get("ebitda", "N/A"))
+
+            total_debt_num = None
+            if "longTermDebt" in bs_rows or "shortTermDebt" in bs_rows:
+                total_debt_num = bs_rows.get("longTermDebt", 0.0) + bs_rows.get("shortTermDebt", 0.0)
+            net_debt_num = (
+                total_debt_num - bs_rows["cashAndCashEquivalents"]
+                if total_debt_num is not None and "cashAndCashEquivalents" in bs_rows
+                else None
+            )
+            fcf_num = (
+                cf_rows["operatingCashflow"] - cf_rows["capitalExpenditures"]
+                if "operatingCashflow" in cf_rows and "capitalExpenditures" in cf_rows
+                else None
+            )
+            free_cash_flow_val = fmt(fcf_num) if fcf_num is not None else "N/A"
+            buybacks_val = "N/A"  # not a field the DSE schema exposes
+            net_debt_val = fmt(net_debt_num) if net_debt_num is not None else "N/A"
+            total_debt_val = fmt(total_debt_num) if total_debt_num is not None else "N/A"
+        else:
+            pe_val = g(r"PE Ratio.*?:\s*([\d.]+)", fund)
+            eps_val = g(r"EPS \(TTM\).*?:\s*([\d.]+)", fund)
+            mcap = re.search(r"Market Cap.*?:\s*([\d.]+)", fund)
+            rev_ttm = re.search(r"Revenue \(TTM\).*?:\s*([\d.]+)", fund)
+            mcap_val = fmt(mcap.group(1)) if mcap else "N/A"
+            rev_val = fmt(rev_ttm.group(1)) if rev_ttm else "N/A"
+            beta_val = g(r"Beta.*?:\s*([\d.]+)", fund)
+            div_val = g(r"Dividend Yield.*?:\s*([\d.]+)", fund)
+            hi52_val = g(r"52 Week High.*?:\s*([\d.]+)", fund)
+            lo52_val = g(r"52 Week Low.*?:\s*([\d.]+)", fund)
+            sma50_val = g(r"50 Day Average.*?:\s*([\d.]+)", fund)
+
+            inc_rows = extract_numbers(inc, ["Total Revenue", "Gross Profit", "Operating Income",
+                                             "Net Income From Continuing", "Normalized EBITDA"])
+            cf_rows = extract_numbers(cf, ["Free Cash Flow", "Repurchase Of Capital Stock"])
+            bs_rows = extract_numbers(bs, ["Net Debt", "Total Debt", "Cash And Cash Equivalents"])
+
+            net_income_val = fmt(inc_rows.get("Net Income From Continuing", "N/A"))
+            gross_profit_val = fmt(inc_rows.get("Gross Profit", "N/A"))
+            operating_income_val = fmt(inc_rows.get("Operating Income", "N/A"))
+            ebitda_val = fmt(inc_rows.get("Normalized EBITDA", "N/A"))
+            free_cash_flow_val = fmt(cf_rows.get("Free Cash Flow", "N/A"))
+            buybacks_val = fmt(cf_rows.get("Repurchase Of Capital Stock", "N/A"))
+            net_debt_val = fmt(bs_rows.get("Net Debt", "N/A"))
+            total_debt_val = fmt(bs_rows.get("Total Debt", "N/A"))
 
         data_summary = f"""
 COMPANY: {company} | DATE: {current_date}
@@ -191,26 +293,26 @@ COMPANY: {company} | DATE: {current_date}
 MARKET DATA (TTM):
 - Market Cap: {mcap_val}
 - P/E Ratio: {pe_val}
-- EPS (TTM): ${eps_val}
+- EPS (TTM): {eps_val}
 - Revenue (TTM): {rev_val}
 - Beta: {beta_val}
 - Dividend Yield: {div_val}%
-- 52-Week Range: ${lo52_val} - ${hi52_val}
-- 50-Day SMA: ${sma50_val}
+- 52-Week Range: {lo52_val} - {hi52_val}
+- 50-Day SMA: {sma50_val}
 
 MOST RECENT QUARTER (income statement):
-- Net Income: {fmt(inc_rows.get("Net Income From Continuing", "N/A"))}
-- Gross Profit: {fmt(inc_rows.get("Gross Profit", "N/A"))}
-- Operating Income: {fmt(inc_rows.get("Operating Income", "N/A"))}
-- EBITDA: {fmt(inc_rows.get("Normalized EBITDA", "N/A"))}
+- Net Income: {net_income_val}
+- Gross Profit: {gross_profit_val}
+- Operating Income: {operating_income_val}
+- EBITDA: {ebitda_val}
 
 CASH FLOW (most recent quarter):
-- Free Cash Flow: {fmt(cf_rows.get("Free Cash Flow", "N/A"))}
-- Stock Buybacks: {fmt(cf_rows.get("Repurchase Of Capital Stock", "N/A"))}
+- Free Cash Flow: {free_cash_flow_val}
+- Stock Buybacks: {buybacks_val}
 
 BALANCE SHEET (most recent quarter):
-- Net Debt: {fmt(bs_rows.get("Net Debt", "N/A"))}
-- Total Debt: {fmt(bs_rows.get("Total Debt", "N/A"))}
+- Net Debt: {net_debt_val}
+- Total Debt: {total_debt_val}
 """
 
         prompt = f"""You are a senior financial analyst. Today is {current_date}.
@@ -237,13 +339,13 @@ RULES:
             "market_cap": mcap_val, "pe_ratio": pe_val, "eps_ttm": eps_val,
             "revenue_ttm": rev_val, "beta": beta_val, "dividend_yield": div_val,
             "52w_high": hi52_val, "52w_low": lo52_val, "50d_sma": sma50_val,
-            "net_income_q": fmt(inc_rows.get("Net Income From Continuing", "N/A")),
-            "gross_profit_q": fmt(inc_rows.get("Gross Profit", "N/A")),
-            "operating_income_q": fmt(inc_rows.get("Operating Income", "N/A")),
-            "ebitda_q": fmt(inc_rows.get("Normalized EBITDA", "N/A")),
-            "free_cash_flow_q": fmt(cf_rows.get("Free Cash Flow", "N/A")),
-            "net_debt": fmt(bs_rows.get("Net Debt", "N/A")),
-            "total_debt": fmt(bs_rows.get("Total Debt", "N/A")),
+            "net_income_q": net_income_val,
+            "gross_profit_q": gross_profit_val,
+            "operating_income_q": operating_income_val,
+            "ebitda_q": ebitda_val,
+            "free_cash_flow_q": free_cash_flow_val,
+            "net_debt": net_debt_val,
+            "total_debt": total_debt_val,
         }
         return {"fundamentals_report": report, "fund_metrics": fund_metrics}
 
