@@ -22,6 +22,12 @@ were live in the main analysis pipeline the whole time:
   - sharenews24 was matched against the raw ticker code ("SQURPHARMA"),
     which never appears in a real headline (only "Square Pharmaceuticals"
     does) -- silently matched nothing, ever.
+  - relatedly, even headline-only company-name matching is insufficient on
+    this site: a large share of its coverage is "roundup" articles (Top 10
+    gainers, "Four companies gave the index confidence today") where the
+    headline names no company at all, and the company names only appear in
+    body paragraphs -- confirmed live, see market_data.py's
+    _load_sharenews24_articles docstring for the specific example.
   - get_price_sensitive_news(code=ticker) has no client-side re-check, but
     DSE's server ignores the code= filter for that endpoint (confirmed:
     an ABBANK request returned EXCH/EIL/IPDC items) -- so a ticker's "news"
@@ -34,58 +40,39 @@ were live in the main analysis pipeline the whole time:
 
 Rather than re-fix (and risk re-diverging from) the same logic twice, this
 module now reuses the already-fixed helpers directly from
-app.pipeline.market_data: company-name resolution (incl. Bengali variants,
-since sharenews24 publishes almost exclusively in Bengali), the matching
-logic, and the concurrency semaphore. (tradingagents already depends on
-app.pipeline elsewhere -- see symbol_utils.py's `_llm_guess_dse_ticker`,
-which imports from app.pipeline.llm -- so this follows the same, already
-established, layering.)
+app.pipeline.market_data: company-name resolution (incl. Bengali variants),
+the cached full-article-body sharenews24 store, the matching logic, and the
+concurrency semaphore. (tradingagents already depends on app.pipeline
+elsewhere -- see symbol_utils.py's `_llm_guess_dse_ticker`, which imports
+from app.pipeline.llm -- so this follows the same, already established,
+layering.)
 
 Install: pip install bdshare beautifulsoup4 requests
 """
 
 import logging
 import re
-import time
 
 import pandas as pd
 from bdshare import BDShareError, get_all_news, get_price_sensitive_news
-
-import requests
-from bs4 import BeautifulSoup
 
 from app.pipeline.market_data import (
     _DSEBD_CONCURRENCY,
     _company_name_variants,
     _load_dse_company_names,
+    _load_sharenews24_articles,
     _title_matches_company,
     _DSE_COMPANY_NAMES_BENGALI_FALLBACK,
 )
 
 logger = logging.getLogger(__name__)
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"}
-SHARENEWS24_REQUEST_DELAY_SECONDS = 2.0
-_last_sharenews24_ts = 0.0
-
-SHARENEWS24_BASE = "https://sharenews24.com"
 DEFAULT_ARTICLE_LIMIT = 20
 
 # ✅ FIXED: matches app/pipeline/market_data.py's PER_WEBSITE_CAP -- caps
 # each bdshare-sourced feed so a single 492-row response can't flood the
 # whole prompt.
 _PER_SOURCE_CAP = 20
-
-
-def _throttled_get(url: str) -> requests.Response:
-    global _last_sharenews24_ts
-    elapsed = time.time() - _last_sharenews24_ts
-    if elapsed < SHARENEWS24_REQUEST_DELAY_SECONDS:
-        time.sleep(SHARENEWS24_REQUEST_DELAY_SECONDS - elapsed)
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    _last_sharenews24_ts = time.time()
-    resp.raise_for_status()
-    return resp
 
 
 def _row_to_line(row: pd.Series) -> str:
@@ -137,45 +124,37 @@ def _fetch_price_sensitive_news(ticker: str = None) -> list[str]:
 
 def _fetch_sharenews24(ticker: str = None, limit: int = DEFAULT_ARTICLE_LIMIT) -> list[dict]:
     """
-    Scrapes sharenews24.com's homepage for headlines.
-
-    ✅ FIXED: `ticker` used to be matched directly against headline text --
-    but sharenews24 headlines reference companies by NAME ("Square
-    Pharmaceuticals"), never by raw DSE code ("SQURPHARMA"), so that never
-    matched anything. Now resolves the ticker to its company name (+ known
-    Bengali forms, since sharenews24 publishes almost exclusively in
-    Bengali) via the same helpers market_data.py's _fetch_dse_news uses, and
-    matches against those instead. When `ticker` is None (get_global_news'
-    front-page pull), no filtering is applied, same as before.
+    ✅ FIXED (see module docstring): now pulls from the cached, category-page
+    -scoped, full-article-body store in market_data.py instead of scraping
+    the noisy homepage and matching headline text alone. `ticker` is
+    resolved to its company name (+ Bengali variants) the same way
+    market_data.py does; when `ticker` is None (get_global_news' front-page
+    pull), the most recent cached articles are returned unfiltered.
     """
     try:
-        resp = _throttled_get(SHARENEWS24_BASE)
-    except requests.RequestException as e:
+        articles = _load_sharenews24_articles()
+    except Exception as e:  # noqa: BLE001
         logger.warning("sharenews24 fetch failed: %s", e)
         return []
 
-    variants = None
-    if ticker:
-        company_name = _load_dse_company_names().get(ticker.upper())
-        if not company_name:
-            logger.info("sharenews24: no company name mapped for %s, skipping ticker filter", ticker)
-            return []
-        variants = _company_name_variants(company_name) + _DSE_COMPANY_NAMES_BENGALI_FALLBACK.get(ticker.upper(), [])
+    if ticker is None:
+        return [{"text": a["title"], "link": a["url"]} for a in articles[:limit]]
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    articles = []
-    for link in soup.find_all("a", href=True):
-        title = link.get_text(strip=True)
-        if len(title) < 15:
+    company_name = _load_dse_company_names().get(ticker.upper())
+    if not company_name:
+        logger.info("sharenews24: no company name mapped for %s, skipping ticker filter", ticker)
+        return []
+    variants = _company_name_variants(company_name) + _DSE_COMPANY_NAMES_BENGALI_FALLBACK.get(ticker.upper(), [])
+
+    matches = []
+    for art in articles:
+        haystack = f"{art['title']} {art['text']}"
+        if not _title_matches_company(haystack, variants):
             continue
-        if variants is not None and not _title_matches_company(title, variants):
-            continue
-        href = link["href"]
-        full_link = href if href.startswith("http") else f"{SHARENEWS24_BASE}{href}"
-        articles.append({"text": title, "link": full_link})
-        if len(articles) >= limit:
+        matches.append({"text": art["title"], "link": art["url"]})
+        if len(matches) >= limit:
             break
-    return articles
+    return matches
 
 
 def get_news(ticker: str, start_date: str, end_date: str) -> str:
