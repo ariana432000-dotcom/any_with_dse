@@ -32,6 +32,121 @@ _log = logging.getLogger(__name__)
 import threading
 _DSEBD_CONCURRENCY = threading.Semaphore(3)
 
+# ✅ FIXED (see conversation notes): the previous sharenews24 fetch only ever
+# looked at <a> headline text on the site's homepage. Two separate problems
+# with that, confirmed live:
+#   1. The homepage mixes share-market news with politics/sports/celebrity
+#      gossip -- finance content is a small fraction of the links. The site
+#      has dedicated category pages that are almost entirely on-topic.
+#   2. Headline text alone is structurally insufficient. A large share of
+#      this outlet's finance coverage is "roundup" style ("Top 10 gainers",
+#      "Four companies gave the index confidence today") where the headline
+#      names NO company at all -- the companies are only named in the body
+#      paragraphs. Worse, even the per-article meta-description/teaser
+#      (~250 chars) routinely truncates mid-list: a real example headlined
+#      "চার কোম্পানি..." ("Four companies...") named Square Pharmaceuticals,
+#      Pragati Life Insurance, Walton Hi-Tech Industries, and National Bank
+#      Limited -- all in ENGLISH on first mention -- but only the word
+#      "Square" survives before the teaser cuts off; the other three are
+#      well into the body. Only fetching each candidate article's full body
+#      text finds these.
+#
+# Since English company names are used on first mention in body text (this
+# outlet only switches to a Bengali short form -- "স্কয়ার ফার্মা" -- in
+# later sentences of the *same* article), matching the full body against the
+# ENGLISH name variants we already resolve via _load_dse_company_names() is
+# the primary, reliable signal here -- the small hand-typed Bengali dict is
+# now a secondary/backup layer, not the main mechanism.
+#
+# This is cached (not per-ticker) because many different tickers get looked
+# up against the same batch of recent articles -- fetching each candidate
+# article's full body is too expensive to repeat per-ticker (category page +
+# up to _SHARENEWS24_MAX_ARTICLES article bodies, throttled 2s apart, is
+# ~40s on a cold cache). A real production deployment should warm this via a
+# periodic background job rather than paying that ~40s on whichever request
+# happens to find a stale cache -- there's no scheduler wired in here, so
+# this refreshes synchronously (refresh-if-stale, same pattern as
+# _load_dse_company_names below) on whichever request finds it stale.
+_SHARENEWS24_CATEGORY_URLS = [
+    "https://sharenews24.com/group/1/index.html",   # শেয়ারবাজার (Share Market)
+    "https://sharenews24.com/group/17/index.html",  # প্রাইস সেনসেটিভ (Price Sensitive)
+]
+_SHARENEWS24_MAX_ARTICLES = 20
+_SHARENEWS24_CACHE_TTL_SECONDS = 30 * 60  # news moves faster than the 6h company-list cache
+_SHARENEWS24_REQUEST_DELAY_SECONDS = 2.0  # be polite -- there's no public API
+_sharenews24_cache: dict = {"ts": 0.0, "articles": []}
+_sharenews24_lock = threading.Lock()
+
+
+def _sharenews24_get(url: str) -> str:
+    """Throttled fetch -- shared by the category-page pass and every
+    per-article body fetch below, so we never hammer sharenews24.com faster
+    than one request per _SHARENEWS24_REQUEST_DELAY_SECONDS regardless of
+    how many articles we're pulling."""
+    global _last_sharenews24_ts
+    elapsed = _time.time() - _last_sharenews24_ts
+    if elapsed < _SHARENEWS24_REQUEST_DELAY_SECONDS:
+        _time.sleep(_SHARENEWS24_REQUEST_DELAY_SECONDS - elapsed)
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"}
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        html = resp.read().decode("utf-8", "replace")
+    _last_sharenews24_ts = _time.time()
+    return html
+
+
+_last_sharenews24_ts = 0.0
+
+
+def _load_sharenews24_articles(force: bool = False) -> list[dict]:
+    """Returns cached [{"title", "url", "text"}], refreshing if stale.
+    `text` is the FULL article body (get_text() of the whole article page,
+    not just the headline) -- see the module comment above for why that
+    matters here. Deliberately not scoped to a narrower container: we don't
+    have ground truth on this site's exact markup/class names (can't reach
+    it from a plain requests/bash environment to inspect), and the risk of
+    over-matching from surrounding recirculation widgets is low (a company
+    name showing up in a *different* teaser on the same page is still a
+    genuine, real mention of that company somewhere on the site)."""
+    with _sharenews24_lock:
+        if not force and (_time.time() - _sharenews24_cache["ts"]) < _SHARENEWS24_CACHE_TTL_SECONDS:
+            return _sharenews24_cache["articles"]
+
+        from bs4 import BeautifulSoup
+
+        candidates: dict[str, str] = {}  # url -> title
+        for cat_url in _SHARENEWS24_CATEGORY_URLS:
+            try:
+                html = _sharenews24_get(cat_url)
+            except Exception as e:  # noqa: BLE001
+                _log.warning("sharenews24 category fetch failed (%s): %s", cat_url, e)
+                continue
+            soup = BeautifulSoup(html, "html.parser")
+            for link in soup.find_all("a", href=True):
+                title = link.get_text(strip=True)
+                if len(title) < 15:
+                    continue
+                href = link["href"]
+                full_link = href if href.startswith("http") else f"https://sharenews24.com{href}"
+                candidates.setdefault(full_link, title)
+
+        articles = []
+        for url, title in list(candidates.items())[:_SHARENEWS24_MAX_ARTICLES]:
+            try:
+                html = _sharenews24_get(url)
+            except Exception as e:  # noqa: BLE001
+                _log.warning("sharenews24 article body fetch failed (%s): %s", url, e)
+                continue
+            body_text = BeautifulSoup(html, "html.parser").get_text(separator=" ", strip=True)
+            articles.append({"title": title, "url": url, "text": body_text})
+
+        _log.info("sharenews24: refreshed cache, %d candidate headlines -> %d article bodies fetched",
+                   len(candidates), len(articles))
+        _sharenews24_cache["ts"] = _time.time()
+        _sharenews24_cache["articles"] = articles
+        return articles
+
 
 def _stooq_symbol(symbol: str, asset_type: str = "stock") -> str:
     s = symbol.strip().lower()
@@ -492,40 +607,25 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
         _log.info("DSE news[%s] skipping sharenews24 — no company name mapped for this ticker", sym)
     else:
         try:
-            req = urllib.request.Request(
-                "https://sharenews24.com",
-                headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                status = getattr(resp, "status", "?")
-                html = resp.read().decode("utf-8", "replace")
-            _log.info("DSE news[%s] sharenews24 fetched: HTTP %s, %d bytes", sym, status, len(html))
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html, "html.parser")
-            all_links = soup.find_all("a", href=True)
-            matched = 0
+            articles = _load_sharenews24_articles()
             bucket = groups["sharenews24.com"]
             variants = all_name_variants
-            for link in all_links:
-                title = link.get_text(strip=True)
-                if len(title) < 15 or not _title_matches_company(title, variants):
+            matched = 0
+            for art in articles:
+                # ✅ FIXED: match against the full article body, not just the
+                # headline -- see _load_sharenews24_articles' docstring.
+                haystack = f"{art['title']} {art['text']}"
+                if not _title_matches_company(haystack, variants):
                     continue
-                href = link["href"]
-                full_link = href if href.startswith("http") else f"https://sharenews24.com{href}"
-                bucket.append({"title": title, "source": "sharenews24.com", "url": full_link})
+                bucket.append({"title": art["title"], "source": "sharenews24.com", "url": art["url"]})
                 matched += 1
                 if matched >= PER_WEBSITE_CAP:
                     break
-            _log.info("DSE news[%s] sharenews24: %d/%d links matched %r (variants tried: %r)",
-                      sym, matched, len(all_links), company_name, variants)
-            if matched == 0 and all_links:
-                qualifying = [l.get_text(strip=True) for l in all_links if len(l.get_text(strip=True)) >= 15]
-                # first 5 links on a page are usually nav-menu chrome, not
-                # content — spread the sample across the whole list so we
-                # actually see what the article/content section looks like.
-                step = max(1, len(qualifying) // 15)
-                sample = qualifying[::step][:15]
-                _log.info("DSE news[%s] sharenews24 sample headlines (spread across page, no match found): %r", sym, sample)
+            _log.info("DSE news[%s] sharenews24: %d/%d cached articles matched %r (variants tried: %r)",
+                      sym, matched, len(articles), company_name, variants)
+            if matched == 0 and articles:
+                _log.info("DSE news[%s] sharenews24 sample titles (no match found): %r",
+                          sym, [a["title"] for a in articles[:10]])
         except Exception as e:  # noqa: BLE001
             _log.warning("DSE news[%s] sharenews24 fetch failed: %s", sym, e)
 
