@@ -66,7 +66,7 @@ class Settings(BaseSettings):
 
     # ---- worker cadence ----
     WORKER_INTERVAL_SECONDS: int = 300          # market-data refresh loop
-    DEFAULT_WATCH_TICKERS: str = "AAPL,MSFT,NVDA,TSLA,AMZN"
+    DEFAULT_WATCH_TICKERS: str = "AAPL,MSFT,NVDA,TSLA,AMZN,BEXIMCO,SQURPHARMA,GP,RANFOUNDRY,AMCL(PRAN)"
 
     # ---- daily/periodic dataset export (full analysis + decision -> CSV) ----
     # Runs inside the `worker` container's existing scheduler loop (no separate
