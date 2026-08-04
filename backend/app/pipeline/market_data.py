@@ -78,43 +78,28 @@ _sharenews24_cache: dict = {"ts": 0.0, "articles": []}
 _sharenews24_lock = threading.Lock()
 
 
-def _sharenews24_get(url: str) -> str:
-    """Throttled fetch -- shared by the category-page pass and every
-    per-article body fetch below, so we never hammer sharenews24.com faster
-    than one request per _SHARENEWS24_REQUEST_DELAY_SECONDS regardless of
-    how many articles we're pulling."""
-    global _last_sharenews24_ts
-    elapsed = _time.time() - _last_sharenews24_ts
-    if elapsed < _SHARENEWS24_REQUEST_DELAY_SECONDS:
-        _time.sleep(_SHARENEWS24_REQUEST_DELAY_SECONDS - elapsed)
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"}
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        html = resp.read().decode("utf-8", "replace")
-    _last_sharenews24_ts = _time.time()
-    return html
+# 🔴 FIXED (was still broken -- confirmed live): the note above said this
+# "refreshes synchronously... on whichever request finds it stale," and
+# flagged that as a real risk rather than a hidden one. It then actually
+# happened: "Request to /stocks/SQURPHARMA/news?limit=12 timed out after
+# 20000ms" -- a cold refresh (2 category fetches + up to
+# _SHARENEWS24_MAX_ARTICLES article fetches, throttled 2s apart, ~40s worst
+# case) blew straight through the request's 20s budget. There's still no
+# job scheduler wired into this app to warm the cache out-of-band, so this
+# now does the next best thing itself: the request path NEVER blocks on the
+# fetch loop. If the cache is stale, a background daemon thread is kicked
+# off (at most one at a time) to do the ~40s refresh, and the request
+# returns immediately with whatever's currently cached -- which may be
+# genuinely empty on the very first request after a cold deploy, but will
+# be populated for every request after that first ~40s window closes.
+_sharenews24_refreshing = False
 
 
-_last_sharenews24_ts = 0.0
+def _sharenews24_refresh_worker() -> None:
+    global _sharenews24_refreshing
+    from bs4 import BeautifulSoup
 
-
-def _load_sharenews24_articles(force: bool = False) -> list[dict]:
-    """Returns cached [{"title", "url", "text"}], refreshing if stale.
-    `text` is the FULL article body (get_text() of the whole article page,
-    not just the headline) -- see the module comment above for why that
-    matters here. Deliberately not scoped to a narrower container: we don't
-    have ground truth on this site's exact markup/class names (can't reach
-    it from a plain requests/bash environment to inspect), and the risk of
-    over-matching from surrounding recirculation widgets is low (a company
-    name showing up in a *different* teaser on the same page is still a
-    genuine, real mention of that company somewhere on the site)."""
-    with _sharenews24_lock:
-        if not force and (_time.time() - _sharenews24_cache["ts"]) < _SHARENEWS24_CACHE_TTL_SECONDS:
-            return _sharenews24_cache["articles"]
-
-        from bs4 import BeautifulSoup
-
+    try:
         candidates: dict[str, str] = {}  # url -> title
         for cat_url in _SHARENEWS24_CATEGORY_URLS:
             try:
@@ -141,11 +126,65 @@ def _load_sharenews24_articles(force: bool = False) -> list[dict]:
             body_text = BeautifulSoup(html, "html.parser").get_text(separator=" ", strip=True)
             articles.append({"title": title, "url": url, "text": body_text})
 
-        _log.info("sharenews24: refreshed cache, %d candidate headlines -> %d article bodies fetched",
+        _log.info("sharenews24: background refresh done, %d candidate headlines -> %d article bodies fetched",
                    len(candidates), len(articles))
-        _sharenews24_cache["ts"] = _time.time()
-        _sharenews24_cache["articles"] = articles
-        return articles
+        with _sharenews24_lock:
+            _sharenews24_cache["ts"] = _time.time()
+            _sharenews24_cache["articles"] = articles
+    except Exception:  # noqa: BLE001
+        _log.exception("sharenews24: background refresh crashed")
+    finally:
+        with _sharenews24_lock:
+            _sharenews24_refreshing = False
+
+
+def _sharenews24_get(url: str) -> str:
+    """Throttled fetch -- shared by the category-page pass and every
+    per-article body fetch, so we never hammer sharenews24.com faster than
+    one request per _SHARENEWS24_REQUEST_DELAY_SECONDS regardless of how
+    many articles we're pulling. Only ever called from the background
+    refresh thread (see _sharenews24_refresh_worker), never from a request
+    thread -- that's the fix."""
+    global _last_sharenews24_ts
+    elapsed = _time.time() - _last_sharenews24_ts
+    if elapsed < _SHARENEWS24_REQUEST_DELAY_SECONDS:
+        _time.sleep(_SHARENEWS24_REQUEST_DELAY_SECONDS - elapsed)
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"}
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        html = resp.read().decode("utf-8", "replace")
+    _last_sharenews24_ts = _time.time()
+    return html
+
+
+_last_sharenews24_ts = 0.0
+
+
+def _load_sharenews24_articles(force: bool = False) -> list[dict]:
+    """Returns whatever's currently cached [{"title", "url", "text"}] and,
+    if stale, kicks off a background refresh -- but NEVER blocks the caller
+    on that refresh (see the 🔴 FIXED note above; this used to block and
+    caused a live request timeout). `text` is the FULL article body
+    (get_text() of the whole article page, not just the headline) -- see
+    the ✅ FIXED note further above for why that matters here. Deliberately
+    not scoped to a narrower container: we don't have ground truth on this
+    site's exact markup/class names (can't reach it from a plain
+    requests/bash environment to inspect), and the risk of over-matching
+    from surrounding recirculation widgets is low (a company name showing
+    up in a *different* teaser on the same page is still a genuine, real
+    mention of that company somewhere on the site).
+
+    First-ever call after a cold deploy returns an empty list (nothing
+    cached yet) while the background thread populates it -- callers should
+    treat an empty result as "not yet warmed," not "no news.\""""
+    global _sharenews24_refreshing
+    with _sharenews24_lock:
+        stale = force or (_time.time() - _sharenews24_cache["ts"]) >= _SHARENEWS24_CACHE_TTL_SECONDS
+        if stale and not _sharenews24_refreshing:
+            _sharenews24_refreshing = True
+            threading.Thread(target=_sharenews24_refresh_worker, daemon=True, name="sharenews24-refresh").start()
+        return _sharenews24_cache["articles"]
 
 
 def _stooq_symbol(symbol: str, asset_type: str = "stock") -> str:
@@ -843,7 +882,7 @@ def _load_dse_company_names() -> dict[str, str]:
         # fallback for real outages (not cert issues).
         from bdshare.util.helper import _session as _bdshare_session
         html = None
-        last_exc = None
+        host_errors = {}
         for host in ("https://www.dsebd.org", "https://dse.com.bd"):
             try:
                 with _DSEBD_CONCURRENCY:
@@ -856,10 +895,16 @@ def _load_dse_company_names() -> dict[str, str]:
                     html = resp.text
                 break
             except Exception as e:  # noqa: BLE001
-                last_exc = e
+                # ✅ FIXED: previously only the LAST host's error was kept
+                # (last_exc), so a log line like "dse.com.bd: 403" told you
+                # nothing about whether www.dsebd.org failed the same way or
+                # differently. Logging both is purely diagnostic -- doesn't
+                # change what requests get made.
+                host_errors[host] = repr(e)
                 continue
         if html is None:
-            raise last_exc or RuntimeError("both dsebd.org and dse.com.bd failed")
+            _log.warning("DSE company listing: all hosts failed — %s", host_errors)
+            raise RuntimeError(f"both dsebd.org and dse.com.bd failed: {host_errors}")
         from bs4 import BeautifulSoup
         text = BeautifulSoup(html, "html.parser").get_text(" ")
         pairs = re.findall(r"\b([A-Z][A-Z0-9]{1,15})\s*\(([^)]{3,80})\)", text)
