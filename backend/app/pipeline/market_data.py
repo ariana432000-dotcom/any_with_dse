@@ -113,6 +113,18 @@ def _sharenews24_refresh_worker() -> None:
                 if len(title) < 15:
                     continue
                 href = link["href"]
+                # ✅ FIXED: confirmed live -- some of the 20 "articles" we
+                # fetched turned out to be the site's own nav-menu category
+                # labels ("বিনিয়োগকারীর কথা", "প্রাইস সেনসেটিভ", etc, which
+                # link to /group/N/index.html), not real articles. Their
+                # Bengali text is long enough to clear the len>=15 filter
+                # above, so they slipped through as candidates and wasted a
+                # scrape slot on a category listing page. Every real
+                # article on this site lives under /article/<id>/index.html
+                # (confirmed across every article link seen so far) --
+                # restrict candidates to that path.
+                if "/article/" not in href:
+                    continue
                 full_link = href if href.startswith("http") else f"https://sharenews24.com{href}"
                 candidates.setdefault(full_link, title)
 
