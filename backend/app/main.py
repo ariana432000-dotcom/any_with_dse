@@ -52,6 +52,20 @@ async def lifespan(app: FastAPI):
     else:
         log.info("AI provider: %s (%s) — %s", info["provider"], info["model"], info["detail"])
 
+    # Warm the sharenews24 article cache now instead of waiting for the
+    # first DSE news request to find it stale. That request-triggered path
+    # still exists as a fallback (e.g. after the 30-min TTL expires), but
+    # relying on it alone means whichever user's request happens to arrive
+    # first after a deploy gets 0 sharenews24 results while a ~40-50s
+    # background refresh runs — confirmed live (Railway log showed exactly
+    # this: a BEXIMCO request logged "0/0 cached articles" while the
+    # refresh it had triggered didn't finish until 53s later). This doesn't
+    # block startup — it only starts the background thread and returns
+    # immediately, same as the request-triggered call does.
+    from app.pipeline.market_data import _load_sharenews24_articles
+    with contextlib.suppress(Exception):
+        _load_sharenews24_articles()
+        
     try:
         yield
     finally:
