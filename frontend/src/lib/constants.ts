@@ -4,11 +4,6 @@ export const APP_NAME = "AInvest";
 
 export const DEFAULT_WATCHLIST = [
   "AAPL", "MSFT", "NVDA", "TSLA", "AMZN",
-  // ✅ CHANGED: 5 DSE (Dhaka Stock Exchange) tickers alongside the global
-  // ones — BEXIMCO/SQURPHARMA/GP are large, frequently-covered names (good
-  // odds of hits across all 4 DSE news sources); RANFOUNDRY/AMCL(PRAN) are
-  // smaller-cap names included deliberately so the news pipeline gets
-  // exercised against less-covered tickers too, not just the easy cases.
   "BEXIMCO", "SQURPHARMA", "GP", "RANFOUNDRY", "AMCL(PRAN)",
 ];
 
