@@ -72,26 +72,6 @@ _SHARENEWS24_CATEGORY_URLS = [
     "https://sharenews24.com/group/17/index.html",  # প্রাইস সেনসেটিভ (Price Sensitive)
     "https://sharenews24.com/group/18/index.html",  # টেকনিক্যাল অ্যানালাইসিস (Technical Analysis)
     "https://sharenews24.com/group/9/index.html",   # বিনিয়োগকারীর কথা (Investor's Word)
-    # ✅ FIXED (Islami Bank / ISLAMIBANK reported as missing from
-    # sharenews24 entirely): confirmed live -- bank-sector news (deposit-
-    # account notices, quarterly results, regulatory actions) and bank
-    # *governance* news (the Islami Bank Bangladesh PLC ownership/chairman
-    # saga specifically) are published under these two categories, not
-    # under শেয়ারবাজার. Example confirmed live: "বিশেষ ছাড় ঘোষণা ইসলামী
-    # ব্যাংকের" (sharenews24.com/article/121423), dated 2026-08-03 and
-    # squarely about ISLAMIBANK ("ইসলামী ব্যাংক বাংলাদেশ পিএলসি" in the
-    # body), sits under অর্থনীতি -- its breadcrumb is প্রচ্ছদ > অর্থনীতি >
-    # বিস্তারিত, group/2, never group/1/17/18/9. Governance/ownership
-    # coverage of the same company (chairman resignation, Bangladesh Bank
-    # intervention) similarly runs under জাতীয়. Neither category was ever
-    # scraped, so this class of article never entered the cache regardless
-    # of how correct the name-matching below is -- the ticker had nothing
-    # to match against. Safe to add broadly: matching still runs per-ticker
-    # against full article bodies afterward (see _title_matches_company),
-    # so non-market articles from these categories just won't match any
-    # company's name variants and are silently dropped, same as before.
-    "https://sharenews24.com/group/2/index.html",   # অর্থনীতি (Economy)
-    "https://sharenews24.com/group/3/index.html",   # জাতীয় (National)
 ]
 # ✅ CHANGED (GP-vs-BEXIMCO gap): the old version fetched at most 20 NEW
 # article bodies per refresh and then REPLACED the whole cache with just
@@ -185,7 +165,39 @@ def _sharenews24_refresh_worker() -> None:
             except Exception as e:  # noqa: BLE001
                 _log.warning("sharenews24 article body fetch failed (%s): %s", url, e)
                 continue
-            body_text = BeautifulSoup(html, "html.parser").get_text(separator=" ", strip=True)
+            try:
+                article_soup = BeautifulSoup(html, "html.parser")
+                # 🔴 FIXED (still broken -- confirmed with a worst-case test):
+                # the previous version restricted extraction to <p> tags,
+                # reasoning that sidebar/ticker/nav items are <a> links
+                # instead of paragraphs. That's true for the "সর্বশেষ"/
+                # "সর্বোচ্চ পঠিত" sidebar lists (<li><a>...) but NOT
+                # necessarily for the "শিরোনাম" ticker at the top of every
+                # page, which renders as flowing inline links rather than a
+                # bulleted list -- a strong sign its markup is closer to
+                # <p><a href="...">Headline</a></p> repeated per item. If
+                # so, <p>-only extraction still keeps that anchor text,
+                # which is exactly the same contamination as before (a
+                # ticker item mentioning some company leaks into every
+                # article's body_text, matching unrelated stories against
+                # that company). Since we can't fetch this site's raw HTML
+                # from this environment to confirm the ticker's exact tag,
+                # the robust fix doesn't depend on guessing right: strip
+                # EVERY <a> tag (and its text) out of the tree first, THEN
+                # extract <p> text. This removes anchor-wrapped boilerplate
+                # regardless of which container tag wraps it (<p>, <li>,
+                # <div>, ...), while genuine article prose -- which isn't
+                # itself a giant clickable link -- survives untouched.
+                for a_tag in article_soup.find_all("a"):
+                    a_tag.decompose()
+                paragraphs = article_soup.find_all("p")
+                if paragraphs:
+                    body_text = " ".join(p.get_text(" ", strip=True) for p in paragraphs)
+                else:
+                    body_text = article_soup.get_text(separator=" ", strip=True)
+            except Exception as e:  # noqa: BLE001
+                _log.warning("sharenews24 article body parse failed (%s): %s", url, e)
+                continue
             new_articles.append({"title": title, "url": url, "text": body_text})
 
         _log.info(
@@ -239,15 +251,20 @@ def _load_sharenews24_articles(force: bool = False) -> list[dict]:
     """Returns whatever's currently cached [{"title", "url", "text"}] and,
     if stale, kicks off a background refresh -- but NEVER blocks the caller
     on that refresh (see the 🔴 FIXED note above; this used to block and
-    caused a live request timeout). `text` is the FULL article body
-    (get_text() of the whole article page, not just the headline) -- see
-    the ✅ FIXED note further above for why that matters here. Deliberately
-    not scoped to a narrower container: we don't have ground truth on this
-    site's exact markup/class names (can't reach it from a plain
-    requests/bash environment to inspect), and the risk of over-matching
-    from surrounding recirculation widgets is low (a company name showing
-    up in a *different* teaser on the same page is still a genuine, real
-    mention of that company somewhere on the site).
+    caused a live request timeout). `text` is the article's own body
+    paragraphs with every <a>-tag (nav/ticker/sidebar/related-article link)
+    stripped out first -- see the 🔴 FIXED note in _sharenews24_refresh_worker
+    for why: matching against the full raw page text let boilerplate
+    widgets (shared near-verbatim across every article on the site) falsely
+    tag unrelated stories as being about whatever company happened to be in
+    that widget.
+
+    ⚠️ Cache accumulates and never re-scrapes an already-cached URL (see the
+    "GP-vs-BEXIMCO gap" note above) -- so articles cached under an OLDER
+    version of the extraction logic keep their stale `text` until evicted
+    past _SHARENEWS24_CACHE_MAX_SIZE. A code change to the extraction logic
+    only affects newly-scraped articles; restart the process to force a
+    clean re-scrape of everything currently in view.
 
     First-ever call after a cold deploy returns an empty list (nothing
     cached yet) while the background thread populates it -- callers should
@@ -935,20 +952,19 @@ _DSE_COMPANY_NAMES_BENGALI_FALLBACK = {
     "ROBI": ["রবি"],
     "WALTONHIL": ["ওয়ালটন"],
     "BRACBANK": ["ব্র্যাক ব্যাংক"],
-    # ✅ FIXED: bare "ইসলামী ব্যাংক" ("Islami Bank") is also a literal
-    # substring of several OTHER real DSE-listed banks' Bengali names --
-    # confirmed live: সোশ্যাল ইসলামী ব্যাংক (Social Islami Bank), গ্লোবাল
-    # ইসলামী ব্যাংক (Global Islami Bank), ফার্স্ট সিকিউরিটি ইসলামী ব্যাংক
-    # (First Security Islami Bank), and আল-আরাফাহ্‌ ইসলামী ব্যাংক
-    # (Al-Arafah Islami Bank) all contain it, and sharenews24 regularly
-    # covers them (e.g. a 5-of-these-banks merger article) using that same
-    # bare phrase -- so the old variant would misattribute their news to
-    # ISLAMIBANK. "ইসলামী ব্যাংক বাংলাদেশ" ("Islami Bank Bangladesh") is
-    # specific to this company and still matches real coverage: even
-    # articles that shorten to "ইসলামী ব্যাংক" in later sentences use the
-    # full "ইসলামী ব্যাংক বাংলাদেশ পিএলসি" on first mention (matching runs
-    # against the whole body, not just the first sentence -- see
-    # _title_matches_company's caller), so no recall is lost.
+    # ✅ FIXED: bare "ইসলামী ব্যাংক" (= generic "Islami Bank") is a substring
+    # of SEVERAL other DSE-listed banks' actual Bengali names -- confirmed
+    # live, e.g. sharenews24.com's own homepage carries "আল-আরাফাহ্‌ ইসলামী
+    # ব্যাংকের দ্বিতীয় প্রান্তিক প্রকাশ" (Al-Arafah Islami Bank), and the same
+    # collision applies to Social Islami Bank / First Security Islami Bank /
+    # Shahjalal Islami Bank -- none of which are ISLAMIBANK (Islami Bank
+    # Bangladesh PLC). With PER_WEBSITE_CAP=3, those wrong-company matches
+    # can fill (or crowd out) the 3 sharenews24 slots before this ticker's
+    # own real news is ever reached, which is exactly what was reported as
+    # "no sharenews24 news for Islami Bank". "বাংলাদেশ" only appears in this
+    # company's actual name among the "ইসলামী ব্যাংক" companies (confirmed
+    # against a live sharenews24 article: "ইসলামী ব্যাংক বাংলাদেশ পিএলসি"),
+    # so anchoring on the fuller phrase disambiguates it.
     "ISLAMIBANK": ["ইসলামী ব্যাংক বাংলাদেশ"],
     "LHBL": ["লাফার্জহোলসিম"],
     "ABBANK": ["এবি ব্যাংক"],
