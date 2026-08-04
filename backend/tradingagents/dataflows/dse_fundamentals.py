@@ -34,6 +34,7 @@ from . import dse_statement_extractor as _stmt
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.dsebd.org/displayCompany.php"
+ALT_BASE_URL = "https://dse.com.bd/displayCompany.php"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"
 }
@@ -43,14 +44,38 @@ _last_request_ts = 0.0
 
 
 def _throttled_get(url, params=None):
+    """✅ FIXED: previously used a fresh `requests.get()`, which hits
+    dsebd.org's incomplete certificate chain with the *default* certifi
+    bundle -- the same SSL failure confirmed (live, on both a local machine
+    and Railway) and fixed for the company-name listing fetch in
+    app/pipeline/market_data.py. That fix works because bdshare bundles the
+    missing Sectigo DV R36 intermediate into its own shared requests.Session
+    (bdshare.util.helper._session) -- not because of a different host. This
+    reuses that same patched session (still passing our own honest
+    User-Agent per-request) instead of re-implementing SSL trust from
+    scratch, and adds the dse.com.bd fallback as a genuine outage backstop
+    (separate from the cert fix)."""
+    from bdshare.util.helper import _session as _bdshare_session
+
     global _last_request_ts
     elapsed = time.time() - _last_request_ts
     if elapsed < DSE_REQUEST_DELAY_SECONDS:
         time.sleep(DSE_REQUEST_DELAY_SECONDS - elapsed)
-    resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+
+    last_exc = None
+    for target in (url, ALT_BASE_URL if url == BASE_URL else None):
+        if not target:
+            continue
+        try:
+            resp = _bdshare_session.get(target, params=params, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            _last_request_ts = time.time()
+            return resp
+        except requests.RequestException as e:
+            last_exc = e
+            continue
     _last_request_ts = time.time()
-    resp.raise_for_status()
-    return resp
+    raise last_exc
 
 
 def _parse_label_value_tables(soup: BeautifulSoup) -> dict:
