@@ -490,7 +490,7 @@ def _title_matches_company(title: str, variants: list[str]) -> bool:
     return any(v.lower() in t for v in variants)
 
 
-def _fetch_dse_news(symbol: str, limit: int = 8):
+def _fetch_dse_news(symbol: str, limit: int = 8, debug_sink: list | None = None):
     """DSE headlines from every bdshare feed + sharenews24.com.
 
     bdshare sources (matched by ticker code — reliable, structured, but no
@@ -509,7 +509,26 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
 
     Fails soft — any single source failing just means fewer results, never
     a crash, and never raises.
+
+    ✅ CHANGED: debug_sink, if given a list, receives every diagnostic line
+    this function already logs (via a temporary logging.Handler attached to
+    the module logger for the duration of this call) -- lets a debug API
+    route return the *same* diagnostics that would otherwise only be
+    visible in Railway's Deploy Logs, for when navigating that UI is the
+    actual blocker rather than the DSE-fetching logic itself.
     """
+    _debug_handler = None
+    if debug_sink is not None:
+        import logging as _logging
+
+        class _SinkHandler(_logging.Handler):
+            def emit(self, record):
+                debug_sink.append(f"{record.levelname}: {record.getMessage()}")
+
+        _debug_handler = _SinkHandler()
+        _log.addHandler(_debug_handler)
+        _log.setLevel(_logging.INFO)
+
     seen_titles = set()
     sym = symbol.upper()
     # urllib.parse.quote, not an f-string interpolation — some real DSE
@@ -770,7 +789,7 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
                         continue
                     seen_titles.add(line)
                     trimmed = line if len(line) <= 300 else line[:300].rstrip() + "…"
-                    bucket.append({"title": trimmed, "source": "amarstock.com", "url": "https://www.amarstock.com/dse-news"})
+                    bucket.append({"title": trimmed, "source": "amarstock.com", "url": "https://www.amarstock.com/dse-last-7-days-news"})
                     matched += 1
                     if matched >= PER_WEBSITE_CAP:
                         break
@@ -802,6 +821,8 @@ def _fetch_dse_news(symbol: str, limit: int = 8):
             bucket = groups[src]
             if i < len(bucket):
                 merged.append(bucket[i])
+    if _debug_handler is not None:
+        _log.removeHandler(_debug_handler)
     return merged[:limit]
 
 
@@ -823,7 +844,10 @@ _DSE_COMPANY_NAMES_FALLBACK = {
     "BRACBANK": "BRAC Bank",
     "ISLAMIBANK": "Islami Bank",
     "LHBL": "LafargeHolcim Bangladesh",
+    "ABBANK": "AB Bank",
+    "CITY": "City Bank",
     "RANFOUNDRY": "Rangpur Foundry",
+    "AMCL(PRAN)": "Agricultural Marketing Company",
 }
 
 # ✅ CHANGED: sharenews24.com (confirmed live, see Railway log sample) and
@@ -847,7 +871,10 @@ _DSE_COMPANY_NAMES_BENGALI_FALLBACK = {
     "BRACBANK": ["ব্র্যাক ব্যাংক"],
     "ISLAMIBANK": ["ইসলামী ব্যাংক"],
     "LHBL": ["লাফার্জহোলসিম"],
+    "ABBANK": ["এবি ব্যাংক"],
+    "CITY": ["সিটি ব্যাংক"],
     "RANFOUNDRY": ["রংপুর ফাউন্ড্রি"],
+    "AMCL(PRAN)": ["প্রাণ"],
 }
 
 _DSE_COMPANY_NAMES_LIVE: dict[str, str] | None = None
