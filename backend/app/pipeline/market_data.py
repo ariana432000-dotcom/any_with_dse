@@ -165,7 +165,38 @@ def _sharenews24_refresh_worker() -> None:
             except Exception as e:  # noqa: BLE001
                 _log.warning("sharenews24 article body fetch failed (%s): %s", url, e)
                 continue
-            body_text = BeautifulSoup(html, "html.parser").get_text(separator=" ", strip=True)
+            try:
+                article_soup = BeautifulSoup(html, "html.parser")
+                # ✅ FIXED (cross-article contamination): get_text() on the
+                # WHOLE page previously pulled in every sidebar/ticker/
+                # related-article widget too -- confirmed live, every
+                # sharenews24 article page carries a "শিরোনাম" (headlines)
+                # ticker, a "সর্বশেষ" (latest) sidebar of ~40 site-wide
+                # headlines across ALL categories, and an "এ বিভাগের অন্যান্য
+                # সংবাদ" related-articles list. Those recent-headline lists
+                # barely change between articles scraped close together in
+                # time, so if even ONE of them happens to name a company
+                # (e.g. an Islami Bank headline sitting in the sidebar),
+                # EVERY unrelated article scraped in that window (a cabinet-
+                # reshuffle story, a DC-not-answering-calls story, ...)
+                # would spuriously "contain" that company's name and get
+                # matched as if it were about that company.
+                # Real article prose lives in <p> tags; every sidebar/
+                # ticker/nav item on this site is an <a href> link instead
+                # (visible even in a rendered fetch: sidebar items render as
+                # "[Title](url)" while genuine paragraphs render as plain
+                # text) -- so restricting extraction to <p> tags keeps the
+                # actual story and drops the boilerplate. Falls back to the
+                # old whole-page behavior only if a page has no <p> tags at
+                # all (better a few stray matches than an empty match target).
+                paragraphs = article_soup.find_all("p")
+                if paragraphs:
+                    body_text = " ".join(p.get_text(" ", strip=True) for p in paragraphs)
+                else:
+                    body_text = article_soup.get_text(separator=" ", strip=True)
+            except Exception as e:  # noqa: BLE001
+                _log.warning("sharenews24 article body parse failed (%s): %s", url, e)
+                continue
             new_articles.append({"title": title, "url": url, "text": body_text})
 
         _log.info(
