@@ -915,7 +915,20 @@ _DSE_COMPANY_NAMES_BENGALI_FALLBACK = {
     "ROBI": ["রবি"],
     "WALTONHIL": ["ওয়ালটন"],
     "BRACBANK": ["ব্র্যাক ব্যাংক"],
-    "ISLAMIBANK": ["ইসলামী ব্যাংক"],
+    # ✅ FIXED: bare "ইসলামী ব্যাংক" (= generic "Islami Bank") is a substring
+    # of SEVERAL other DSE-listed banks' actual Bengali names -- confirmed
+    # live, e.g. sharenews24.com's own homepage carries "আল-আরাফাহ্‌ ইসলামী
+    # ব্যাংকের দ্বিতীয় প্রান্তিক প্রকাশ" (Al-Arafah Islami Bank), and the same
+    # collision applies to Social Islami Bank / First Security Islami Bank /
+    # Shahjalal Islami Bank -- none of which are ISLAMIBANK (Islami Bank
+    # Bangladesh PLC). With PER_WEBSITE_CAP=3, those wrong-company matches
+    # can fill (or crowd out) the 3 sharenews24 slots before this ticker's
+    # own real news is ever reached, which is exactly what was reported as
+    # "no sharenews24 news for Islami Bank". "বাংলাদেশ" only appears in this
+    # company's actual name among the "ইসলামী ব্যাংক" companies (confirmed
+    # against a live sharenews24 article: "ইসলামী ব্যাংক বাংলাদেশ পিএলসি"),
+    # so anchoring on the fuller phrase disambiguates it.
+    "ISLAMIBANK": ["ইসলামী ব্যাংক বাংলাদেশ"],
     "LHBL": ["লাফার্জহোলসিম"],
     "ABBANK": ["এবি ব্যাংক"],
     "CITY": ["সিটি ব্যাংক"],
