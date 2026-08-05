@@ -160,6 +160,55 @@ def get_income_statement(ticker: str, freq: str = "annual", curr_date: str = Non
     return _stmt.get_statement(ticker, "income_statement", freq=freq, curr_date=curr_date)
 
 
+def quick_check(ticker: str, curr_date: str = None) -> dict:
+    """✅ CHANGED: app/services/market_data.py's get_fundamentals_check()
+    (backing the "Fundamentals Check" UI page) already called this, but it
+    was never actually defined here -- every call raised AttributeError.
+
+    Single-fetch sanity check: reuses get_fundamentals() above (the exact
+    same fetch + keyword-filter path the real AI Analysis pipeline uses),
+    then re-parses its output for the 4 headline numbers so a green check
+    here means the full pipeline will see the same data -- no separate
+    parsing logic to drift out of sync with the real one.
+    """
+    raw = get_fundamentals(ticker, curr_date)
+
+    if raw.startswith("DSE fundamentals unavailable for"):
+        # get_fundamentals's own except-branch string -- the request itself
+        # failed (network/cert/blocked, see the HTTP status now included).
+        empty = {"pe_ratio": None, "eps": None, "market_cap": None, "dividend_yield": None}
+        return {"ticker": ticker, "ok": False, "status": raw, "parsed": empty, "raw_response": raw}
+
+    if raw.startswith("No fundamentals table found"):
+        # Page loaded but _parse_label_value_tables found no rows -- markup
+        # likely changed, different failure mode from a fetch/block issue.
+        empty = {"pe_ratio": None, "eps": None, "market_cap": None, "dividend_yield": None}
+        return {"ticker": ticker, "ok": False, "status": raw, "parsed": empty, "raw_response": raw}
+
+    def _extract(keywords, exclude=()):
+        for line in raw.split("\n"):
+            low = line.lower()
+            if any(k in low for k in keywords) and not any(e in low for e in exclude):
+                return line.split(":", 1)[-1].strip()
+        return None
+
+    parsed = {
+        "pe_ratio": _extract(["pe(x)", "p/e"]),
+        "eps": _extract(["eps"], exclude=("change",)),
+        "market_cap": _extract(["market capitalization", "market cap"]),
+        "dividend_yield": _extract(["dividend"]),
+    }
+    ok = any(v is not None for v in parsed.values())
+    status = (
+        "Fetched and parsed successfully"
+        if ok
+        else "Page fetched (HTTP 200) but none of PE/EPS/Market Cap/Dividend were "
+             "found in the parsed rows -- dsebd.org's label wording may have "
+             "changed. See raw_response below for what was actually parsed."
+    )
+    return {"ticker": ticker, "ok": ok, "status": status, "parsed": parsed, "raw_response": raw[:2000]}
+
+
 # ---------------------------------------------------------------------------
 # Wiring into your existing vendor architecture (interface.py / config.py):
 #
