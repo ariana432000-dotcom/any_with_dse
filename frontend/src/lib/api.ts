@@ -15,6 +15,7 @@ import type {
   DatasetRowsResponse,
   DispatchBackgroundResponse,
   ExecutionRequest,
+  FundamentalsCheckResponse,
   Health,
   HistoryResponse,
   MemoryCollection,
@@ -293,6 +294,12 @@ export const stocksApi = {
   news: (ticker: string, limit = 8) =>
     request<NewsResponse>(
       `/stocks/${encodeURIComponent(ticker)}/news?limit=${limit}`,
+      { timeoutMs: 20_000 },
+    ),
+
+  fundamentalsCheck: (ticker: string) =>
+    request<FundamentalsCheckResponse>(
+      `/stocks/${encodeURIComponent(ticker)}/fundamentals/check`,
       { timeoutMs: 20_000 },
     ),
 };
