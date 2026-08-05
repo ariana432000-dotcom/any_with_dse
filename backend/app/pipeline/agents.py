@@ -122,12 +122,29 @@ def create_fundamentals_analyst(llm, log=print):
         instrument_context = U["build_instrument_context"](company)
         log(f"Fetching fundamentals for {company} on {current_date}")
 
+        from tradingagents.dataflows.symbol_utils import is_dse_ticker
+        _is_dse = is_dse_ticker(company)
+        # 🔴 FIXED: get_balance_sheet/get_cashflow/get_income_statement
+        # default to freq="quarterly" at the LangChain tool-wrapper level
+        # (fundamental_data_tools.py) when freq isn't passed explicitly.
+        # dse_statement_extractor.get_statement() only ever populates data
+        # from annual-report PDFs -- passing freq="quarterly" doesn't
+        # change WHICH data it returns, only the dict key it's wrapped
+        # under ("quarterlyReports" instead of "annualReports"), which is
+        # harmless for extract_dict_numbers (keys inside that don't care
+        # about the wrapper), but is still the wrong semantic label and
+        # worth being explicit about now that this path is being exercised.
+        _stmt_freq = "annual" if _is_dse else "quarterly"
+
         tool_results = {}
         for tool_name, tool_fn, args in [
             ("get_fundamentals", U["get_fundamentals"], {"ticker": company, "curr_date": current_date}),
-            ("get_balance_sheet", U["get_balance_sheet"], {"ticker": company, "curr_date": current_date}),
-            ("get_cashflow", U["get_cashflow"], {"ticker": company, "curr_date": current_date}),
-            ("get_income_statement", U["get_income_statement"], {"ticker": company, "curr_date": current_date}),
+            ("get_balance_sheet", U["get_balance_sheet"],
+             {"ticker": company, "freq": _stmt_freq, "curr_date": current_date}),
+            ("get_cashflow", U["get_cashflow"],
+             {"ticker": company, "freq": _stmt_freq, "curr_date": current_date}),
+            ("get_income_statement", U["get_income_statement"],
+             {"ticker": company, "freq": _stmt_freq, "curr_date": current_date}),
         ]:
             log(f"calling {tool_name}")
             try:
@@ -188,9 +205,7 @@ def create_fundamentals_analyst(llm, log=print):
             m = re.search(pattern, raw)
             return m.group(1) if m else "N/A"
 
-        from tradingagents.dataflows.symbol_utils import is_dse_ticker
-
-        if is_dse_ticker(company):
+        if _is_dse:
             # ✅ FIXED: dsebd.org's snapshot (dse_fundamentals.py) and the
             # PDF-extracted statements (dse_statement_extractor.py) use their
             # own label/key conventions, not yfinance/Alpha Vantage's. The
@@ -364,7 +379,7 @@ RULES:
         #     issue is elsewhere (label wording g_dse doesn't recognize)
         # Remove this key once the real cause is confirmed and fixed.
         fund_metrics["_debug_raw_fundamentals"] = str(fund)[:250]
-        if is_dse_ticker(company):
+        if _is_dse:
             fund_metrics["_debug_raw_balance_sheet"] = str(bs)[:250]
         return {"fundamentals_report": report, "fund_metrics": fund_metrics}
 
