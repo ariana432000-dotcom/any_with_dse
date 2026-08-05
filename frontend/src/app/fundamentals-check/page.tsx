@@ -140,6 +140,28 @@ export default function FundamentalsCheckPage() {
               ))}
             </div>
 
+            {Object.keys(result.all_fields ?? {}).length > 0 ? (
+              <div>
+                <p className="mb-1.5 text-[11px] uppercase tracking-wide text-text-faint">
+                  All fields scraped from dsebd.org ({Object.keys(result.all_fields).length})
+                </p>
+                <div className="max-h-80 overflow-auto rounded-lg border border-border-soft bg-bg-raised">
+                  <table className="w-full text-xs">
+                    <tbody>
+                      {Object.entries(result.all_fields).map(([label, value]) => (
+                        <tr key={label} className="border-b border-border-soft last:border-0">
+                          <td className="whitespace-nowrap px-3 py-1.5 align-top text-text-muted">
+                            {label}
+                          </td>
+                          <td className="px-3 py-1.5 align-top font-mono text-text">{value}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : null}
+
             {result.raw_response ? (
               <div>
                 <p className="mb-1.5 text-[11px] uppercase tracking-wide text-text-faint">
