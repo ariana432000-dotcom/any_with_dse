@@ -140,6 +140,63 @@ def get_fundamentals(ticker: str, curr_date: str = None) -> str:
     return "\n".join(lines)
 
 
+def quick_check(ticker: str, curr_date: str = None) -> dict:
+    """Standalone sanity-check for the UI's "Fundamentals Check" page/route
+    (see app/api/routes/stocks.py's /fundamentals/check and
+    app/services/market_data.py's get_fundamentals_check). Calls
+    get_fundamentals() directly -- one HTTP fetch, no LLM call, no other
+    analysts, no LangGraph pipeline -- so you can verify a scrape/parsing
+    fix in a couple seconds instead of waiting through a full multi-agent
+    AI Analysis run.
+
+    Mirrors the keyword-matching g_dse() logic in
+    app/pipeline/agents.py's create_fundamentals_analyst. Kept as a small,
+    independent copy rather than a shared import: this needs to keep
+    working even if that function's internals change shape, and the two
+    call sites have different failure-handling needs (this one returns a
+    structured status for a UI card; that one silently falls back to
+    "N/A" per-field for an LLM prompt).
+    """
+    raw = get_fundamentals(ticker, curr_date)
+
+    def _find(keywords, exclude=()):
+        for line in raw.split("\n"):
+            low = line.lower()
+            if any(k in low for k in keywords) and not any(e in low for e in exclude):
+                import re
+                m = re.search(r"(-?[\d,]+\.?\d*)", line.split(":", 1)[-1])
+                if m:
+                    return m.group(1).replace(",", "")
+        return None
+
+    parsed = {
+        "pe_ratio": _find(["pe(x)", "p/e"]),
+        "eps": _find(["eps"], exclude=("change",)),
+        "market_cap": _find(["market capitalization", "market cap"]),
+        "dividend_yield": _find(["dividend"]),
+    }
+
+    if raw.startswith("DSE fundamentals snapshot"):
+        ok, status = True, "OK -- live snapshot fetched from dsebd.org successfully."
+    elif raw.startswith("DSE fundamentals unavailable"):
+        ok, status = False, ("FAILED -- the request to dsebd.org/dse.com.bd itself errored "
+                              "(network, cert, or a block like 403). See raw_response below.")
+    elif raw.startswith("No fundamentals table found"):
+        ok, status = False, ("FAILED -- the page loaded but didn't parse into label:value rows "
+                              "(markup may have changed, or dsebd.org served something other "
+                              "than the real company page).")
+    else:
+        ok, status = False, "UNKNOWN -- unexpected response shape, see raw_response below."
+
+    return {
+        "ticker": ticker.upper(),
+        "ok": ok,
+        "status": status,
+        "parsed": parsed,
+        "raw_response": raw[:500],
+    }
+
+
 def get_balance_sheet(ticker: str, freq: str = "annual", curr_date: str = None):
     """Full balance sheet, extracted from the audited annual report PDF."""
     return _stmt.get_statement(ticker, "balance_sheet", freq=freq, curr_date=curr_date)
