@@ -508,6 +508,7 @@ export interface FundamentalsCheckResponse {
     market_cap: string | null;
     dividend_yield: string | null;
   };
+  all_fields: Record<string, string>;
   raw_response: string;
 }
 
