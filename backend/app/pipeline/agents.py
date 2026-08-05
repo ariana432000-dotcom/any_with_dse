@@ -347,6 +347,25 @@ RULES:
             "net_debt": net_debt_val,
             "total_debt": total_debt_val,
         }
+        # 🔧 TEMP DEBUG: surfaces what get_fundamentals actually returned,
+        # right in the same "metrics" panel you already screenshot -- no
+        # need to dig through Railway logs. If everything above is N/A,
+        # this field tells us why in one look:
+        #   - starts with "DSE fundamentals unavailable for..." -> the
+        #     dsebd.org request itself failed (network/cert/blocked)
+        #   - starts with "No fundamentals table found for..." -> the page
+        #     loaded but didn't parse into label:value rows (structure
+        #     changed, or dsebd.org served something other than the real
+        #     company page, e.g. a block/interstitial page)
+        #   - starts with "Error fetching get_fundamentals:" -> the tool
+        #     call itself raised an exception
+        #   - starts with "DSE fundamentals snapshot --" and has PE(x)/EPS/
+        #     Market Capitalization lines -> the fetch worked fine and the
+        #     issue is elsewhere (label wording g_dse doesn't recognize)
+        # Remove this key once the real cause is confirmed and fixed.
+        fund_metrics["_debug_raw_fundamentals"] = str(fund)[:250]
+        if is_dse_ticker(company):
+            fund_metrics["_debug_raw_balance_sheet"] = str(bs)[:250]
         return {"fundamentals_report": report, "fund_metrics": fund_metrics}
 
     return node
