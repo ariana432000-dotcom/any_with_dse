@@ -1021,9 +1021,19 @@ def _load_dse_company_names() -> dict[str, str]:
         for host in ("https://www.dsebd.org", "https://dse.com.bd"):
             try:
                 with _DSEBD_CONCURRENCY:
+                    # 🔴 FIXED (confirmed live, 403 Forbidden on the sibling
+                    # displayCompany.php endpoint with this exact same
+                    # override -- see dse_fundamentals.py's _throttled_get):
+                    # overriding bdshare's own working User-Agent
+                    # ("bdshare/2.0 (...)") with a custom one was the likely
+                    # cause. This endpoint has a fallback (the 11-ticker
+                    # hardcoded dict below) so a 403 here wouldn't have
+                    # raised a visible error -- it would have just silently
+                    # degraded every non-hardcoded ticker to "no sharenews24
+                    # coverage" forever. Dropping the override, same as the
+                    # fundamentals fix.
                     resp = _bdshare_session.get(
                         f"{host}/company_listing.php",
-                        headers={"User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"},
                         timeout=15,
                     )
                     resp.raise_for_status()
