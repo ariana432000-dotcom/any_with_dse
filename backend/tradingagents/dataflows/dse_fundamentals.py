@@ -105,7 +105,16 @@ def _parse_label_value_tables(soup: BeautifulSoup) -> dict:
     colon is still treated as the classic label|value pair; otherwise,
     every cell is checked independently for its own "Label:Value" content
     and split on the first colon.
+
+    🔴 FIXED (confirmed live, ABBANK): chart-range <select> dropdowns
+    ("-Select Option-, 1 month, 3 months, ...") were leaking their full
+    option list into a cell's text, polluting fields with garbage like
+    "Closing Price Graph: -Select Option- 1 month 3 months...". These are
+    UI controls, never real data -- stripped before walking rows.
     """
+    for tag in soup.find_all(["select", "script", "style"]):
+        tag.decompose()
+
     data = {}
     for row in soup.find_all("tr"):
         cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
