@@ -52,7 +52,22 @@ async def lifespan(app: FastAPI):
     else:
         log.info("AI provider: %s (%s) — %s", info["provider"], info["model"], info["detail"])
 
-
+   # Warm the sharenews24 article cache a little after startup, rather
+    # than immediately during it, so this doesn't add concurrent memory
+    # pressure at the exact moment Mongo/Chroma above are also initialising
+    # — a full revert of an earlier version of this (which fired
+    # immediately, inline, during startup) is the first thing to try if
+    # Railway is reporting out-of-memory failures; only reach for this
+    # delayed version once that's confirmed to have resolved it and you
+    # want the cache-warm benefit back. asyncio.sleep here doesn't block
+    # startup or the event loop — it's a separate task.
+    async def _delayed_sharenews24_warm():
+        await asyncio.sleep(15)
+        from app.pipeline.market_data import _load_sharenews24_articles
+        with contextlib.suppress(Exception):
+            _load_sharenews24_articles()
+ 
+    asyncio.create_task(_delayed_sharenews24_warm())
         
     try:
         yield
