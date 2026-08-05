@@ -1,328 +1,1349 @@
 """
-DSE (Dhaka Stock Exchange) fundamentals vendor.
+The agent team — a faithful port of every `create_*` factory in the notebook.
 
-Exposes the same function signatures as alpha_vantage_fundamentals.py so it
-can be dropped into interface.py / config.py as a new `fundamental_data`
-vendor (see the wiring notes at the bottom of this file).
-
-Two tiers of data:
-  1. Headline snapshot ratios (EPS, NAV, P/E, dividend, sponsor holding) --
-     scraped from the DSE company page (dsebd.org). Works for any listed
-     ticker, always available, cheap.
-  2. Full statements (balance sheet / income statement / cash flow) -- DSE
-     does not publish these in structured form anywhere, so they are
-     extracted from the company's audited annual report PDF via
-     dse_statement_extractor.py. See that file for how PDFs get onto disk.
-
-IMPORTANT -- dsebd.org's robots.txt disallows automated crawling. This
-module is meant for a personal/academic project: keep request volume low
-(DSE_REQUEST_DELAY_SECONDS below), identify your bot honestly in the
-User-Agent, and don't run it as a high-frequency or commercial scraper.
-If you need reliable, high-volume access, that's a conversation to have
-with DSE/BSEC directly rather than something to script around quietly.
+Each factory takes an LLM and returns a `node(state)` callable that reads from a
+shared state dict and returns updates, exactly as in the notebook. TradingAgents
+tools are imported lazily so this module also loads in demo mode.
 """
 
-import logging
+from __future__ import annotations
+
 import re
 import time
-from datetime import datetime
 
-import requests
-from bs4 import BeautifulSoup
-
-from . import dse_statement_extractor as _stmt
-
-logger = logging.getLogger(__name__)
-
-BASE_URL = "https://www.dsebd.org/displayCompany.php"
-ALT_BASE_URL = "https://dse.com.bd/displayCompany.php"
-# ✅ CHANGED: no longer overriding a User-Agent here -- _throttled_get now
-# goes through bdshare's own safe_get(), which uses bdshare's own session
-# headers (already proven working across this site's other endpoints).
-DSE_REQUEST_DELAY_SECONDS = 2.0  # be polite -- there's no public API
-
-_last_request_ts = 0.0
+from .llm import invoke_llm_with_retry
 
 
-def _throttled_get(url, params=None):
-    """🔴 FIXED (still 403ing after the User-Agent fix -- confirmed live):
-    dropping our own UA override wasn't enough by itself. bdshare ships
-    its own get_company_info(), which hits this EXACT same
-    displayCompany.php endpoint successfully, via its safe_get() helper --
-    which retries up to 3 times with exponential back-off AND tries both
-    the primary and alt host on every single attempt (up to 6 tries total
-    by default), instead of the one-shot, no-retry fetch this function
-    was doing. If dsebd.org's 403 here is a transient rate-limit/WAF
-    flake rather than a hard, permanent IP-level block, that retry
-    resilience is very plausibly the actual difference between "works"
-    (bdshare's OHLCV/news calls, and bdshare's own get_company_info) and
-    "doesn't" (this function, one attempt, no retry). Reusing bdshare's
-    own proven safe_get() directly -- rather than reimplementing a
-    thinner version of the same retry/fallback logic ourselves -- is the
-    more robust fix. This only changes HOW the HTML is fetched; our own
-    downstream parsing (_parse_label_value_tables) is unchanged, since we
-    need label:value pairs, not bdshare's pd.read_html() table shape.
-    If this STILL 403s after retries, that's strong evidence the block is
-    IP-based (e.g. Railway's datacenter range flagged) rather than
-    request-shape-based -- test the same code from a non-datacenter
-    connection to confirm."""
-    from bdshare.util.helper import BDShareError, safe_get
+def extract_final_proposal(report_text: str) -> str:
+    """Pulls the FINAL TRANSACTION PROPOSAL verdict out of a report so it
+    survives truncation elsewhere (reports get sliced to a few hundred chars
+    when threaded into later prompts). Searches a window of text after the
+    anchor phrase rather than matching same-line only, since the LLM
+    sometimes puts the verdict on the next line
+    ("FINAL TRANSACTION PROPOSAL:**\\n**SELL** - ...").
+    """
+    report_text = str(report_text)
+    idx = report_text.upper().find("FINAL TRANSACTION PROPOSAL")
+    if idx == -1:
+        return ""
+    window = report_text[idx: idx + 150]
+    m = re.search(r"\b(BUY|SELL|HOLD)\b", window, re.IGNORECASE)
+    if not m:
+        return ""
+    return f"FINAL TRANSACTION PROPOSAL: {m.group(1).upper()}"
 
-    global _last_request_ts
-    elapsed = time.time() - _last_request_ts
-    if elapsed < DSE_REQUEST_DELAY_SECONDS:
-        time.sleep(DSE_REQUEST_DELAY_SECONDS - elapsed)
 
-    try:
-        resp = safe_get(
-            url, params=params,
-            alt_url=ALT_BASE_URL if url == BASE_URL else None,
-            retries=3, pause=1.0, timeout=15,
+def _ta_utils(ticker: str = ""):
+    """Grab the data-fetching + instrument-context helpers the agents need
+    (lazy import).
+
+    ✅ CHANGED: get_fundamentals/get_balance_sheet/get_cashflow/
+    get_income_statement/get_stock_data/get_indicators/get_news/
+    get_global_news now come from `.data_providers` (FMP + Finnhub) instead
+    of tradingagents' yfinance-backed tools — output format is unchanged, so
+    everything downstream in this file still works as-is.
+    build_instrument_context/get_language_instruction are unrelated to the
+    data-source swap and stay on the real (non-black-box) tradingagents
+    implementation.
+
+    ✅ CHANGED (DSE): when `ticker` is a live Dhaka Stock Exchange trading
+    code (checked via symbol_utils.is_dse_ticker, which consults bdshare's
+    real trading-code list), the data-fetching functions instead come from
+    tradingagents.agents.utils.agent_utils — the original, non-FMP toolset,
+    which routes through interface.py's route_to_vendor() and auto-selects
+    the "dse" vendor (bdshare-backed) for these tickers. Default ticker=""
+    preserves the old FMP/Finnhub behavior for every call site that doesn't
+    pass one — those only use build_instrument_context/get_language_
+    instruction, which are unaffected either way.
+    """
+    from tradingagents.agents.utils.agent_utils import (
+        build_instrument_context,
+        get_language_instruction,
+    )
+    from tradingagents.dataflows.symbol_utils import is_dse_ticker
+
+    if ticker and is_dse_ticker(ticker):
+        from tradingagents.agents.utils.agent_utils import (
+            get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement,
+            get_stock_data, get_indicators,
+            get_news, get_global_news,
         )
-        return resp
-    except BDShareError as e:
-        # Re-raise as requests.RequestException so get_fundamentals()'s
-        # existing `except requests.RequestException` still catches this
-        # without needing its own change -- BDShareError is a plain
-        # Exception subclass, not a RequestException one.
-        raise requests.RequestException(str(e)) from e
-    finally:
-        _last_request_ts = time.time()
-
-
-def _parse_label_value_tables(soup: BeautifulSoup) -> dict:
-    """
-    🔴 FIXED (confirmed live via the Fundamentals Check debug view):
-    dsebd.org's page mixes two different row layouts. Some rows are clean
-    "<td>Label</td><td>Value</td>" pairs (handled by the original logic
-    below). Others -- confirmed live, e.g. a row whose two cells were
-    literally "Trading Code:BEXIMCO" and "Scrip Code:99613" -- pack a
-    compact "Label:Value" INSIDE each cell of a 2-column grid, so treating
-    cell[0] as the label and cell[1] as the value for the whole row
-    produced garbage entries like {"Trading Code:BEXIMCO": "Scrip
-    Code:99613"}. This is exactly the section that holds P/E, EPS, and
-    Market Capitalization, so those never made it into `fields` under any
-    recognizable label. Now: a 2-cell row where NEITHER cell contains a
-    colon is still treated as the classic label|value pair; otherwise,
-    every cell is checked independently for its own "Label:Value" content
-    and split on the first colon.
-
-    🔴 FIXED (confirmed live via a real dsebd.org screenshot, ISLAMIBANK):
-    P/E ratio and EPS live in WIDE time-series tables --
-    "Particulars | Jul 28, 2026 | Jul 29, 2026 | ... | Aug 04, 2026" --
-    not simple 2-cell rows, which is why they never appeared under any
-    label at all before (neither branch above matches a 7-cell row).
-    For rows with more than 2 cells: take the label from column 0, and
-    the RIGHTMOST cell that actually has a reported number as that row's
-    "current/latest" value -- skipping "-"/"n/a" placeholder columns for
-    periods with no data yet. Two consequences confirmed against the real
-    page: (1) a fully-dashed row (e.g. the "un-audited" P/E table, before
-    the audited figures exist) contributes nothing rather than a bogus
-    entry; (2) a pure-header wide row (e.g. "Earnings per share(EPS) |
-    EPS - Continuing Operations | NAV Per Share | ...", where every
-    "value" cell is text, not a number) also contributes nothing --
-    fixing the earlier "Earnings per share(EPS): EPS - Continuing
-    Operations" garbage as a side effect, since no cell there is numeric.
-    """
-    for tag in soup.find_all(["select", "script", "style"]):
-        tag.decompose()
-
-    time_pattern = re.compile(r"^\d{1,2}:\d{2}")
-    no_value = {"-", "--", "n/a", "na", ""}
-
-    def _latest_numeric_cell(cells):
-        for cell in reversed(cells):
-            c = cell.strip()
-            if c.lower() in no_value:
-                continue
-            if any(ch.isdigit() for ch in c):
-                return c
-        return None
-
-    data = {}
-    for row in soup.find_all("tr"):
-        cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
-        cells = [c for c in cells if c]
-        if len(cells) < 2:
-            continue
-        if len(cells) == 2 and ":" not in cells[0] and ":" not in cells[1]:
-            data[cells[0].rstrip(":").strip()] = cells[1]
-        elif len(cells) == 2:
-            for cell in cells:
-                # 🔴 FIXED (confirmed live, ISLAMIBANK): a plain time value
-                # like "2:40 PM" also "contains a colon", so the per-cell
-                # split above was misreading it as label="2", value="40 PM".
-                # Skip anything that starts like a clock time.
-                if ":" in cell and not time_pattern.match(cell):
-                    label, _, value = cell.partition(":")
-                    label, value = label.strip(), value.strip()
-                    if label and value:
-                        data[label] = value
-        else:
-            label = cells[0].rstrip(":").strip()
-            value = _latest_numeric_cell(cells[1:])
-            if not (label and value):
-                continue
-            data[label] = value
-            # EPS sub-rows are often labeled just "Basic"/"Diluted*"
-            # rather than repeating "EPS" -- alias them so the "eps"
-            # keyword match downstream (wanted_keywords / g_dse) can find
-            # them under a recognizable name.
-            low = label.lower()
-            if low.startswith("basic"):
-                data["EPS (Basic)"] = value
-            elif low.startswith("diluted"):
-                data["EPS (Diluted)"] = value
-    return data
-
-
-def _fetch_fields(ticker: str) -> tuple[dict | None, str | None]:
-    """Fetch + parse the DSE snapshot page into the full, UNFILTERED
-    {label: value} dict. Shared by get_fundamentals() (which applies the
-    wanted_keywords filter on top) and quick_check() (which needs the
-    complete dict, not just the filtered subset, to show what dsebd.org's
-    page actually contains when diagnosing a parsing gap). Returns
-    (fields, None) on success or (None, error_message) on failure."""
-    try:
-        resp = _throttled_get(BASE_URL, params={"name": ticker})
-    except requests.RequestException as e:
-        logger.warning("DSE fundamentals fetch failed for %s: %s", ticker, e)
-        return None, f"DSE fundamentals unavailable for {ticker}: {e}"
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    fields = _parse_label_value_tables(soup)
-    if not fields:
-        return None, (
-            f"No fundamentals table found for {ticker} on DSE. The page "
-            f"markup may have changed -- inspect {BASE_URL}?name={ticker} "
-            f"manually (view-source) and update _parse_label_value_tables."
-        )
-    return fields, None
-
-
-def get_fundamentals(ticker: str, curr_date: str = None) -> str:
-    """
-    Scrape the DSE company snapshot page for headline fundamentals: EPS,
-    NAV per share, P/E, sponsor/director/govt/institute/foreign/public
-    holding %, market cap, last dividend, etc.
-    """
-    fields, error = _fetch_fields(ticker)
-    if error:
-        return error
-
-    wanted_keywords = [
-        "last trading price", "closing price", "face value", "market category",
-        "sector", "pe(x)", "p/e", "price earning", "eps", "nav per share",
-        "nav(per share)", "market capitalization", "market cap",
-        "dividend", "sponsor", "govt", "institute", "foreign", "public",
-        "trading code", "scrip code",
-    ]
-    lines = [f"DSE fundamentals snapshot -- {ticker} (as of {curr_date or datetime.now().date()})"]
-    for key, value in fields.items():
-        if any(w in key.lower() for w in wanted_keywords):
-            lines.append(f"{key}: {value}")
-    if len(lines) == 1:
-        # keyword filter matched nothing -- dump everything rather than
-        # silently return an empty-looking report
-        lines += [f"{k}: {v}" for k, v in fields.items()]
-    return "\n".join(lines)
-
-
-def quick_check(ticker: str, curr_date: str = None) -> dict:
-    """Standalone sanity-check for the UI's "Fundamentals Check" page/route
-    (see app/api/routes/stocks.py's /fundamentals/check and
-    app/services/market_data.py's get_fundamentals_check). Calls
-    get_fundamentals() directly -- one HTTP fetch, no LLM call, no other
-    analysts, no LangGraph pipeline -- so you can verify a scrape/parsing
-    fix in a couple seconds instead of waiting through a full multi-agent
-    AI Analysis run.
-
-    Mirrors the keyword-matching g_dse() logic in
-    app/pipeline/agents.py's create_fundamentals_analyst. Kept as a small,
-    independent copy rather than a shared import: this needs to keep
-    working even if that function's internals change shape, and the two
-    call sites have different failure-handling needs (this one returns a
-    structured status for a UI card; that one silently falls back to
-    "N/A" per-field for an LLM prompt).
-    """
-    raw = get_fundamentals(ticker, curr_date)
-    all_fields, _fetch_error = _fetch_fields(ticker)
-
-    def _find(keywords, exclude=()):
-        for line in raw.split("\n"):
-            low = line.lower()
-            if any(k in low for k in keywords) and not any(e in low for e in exclude):
-                import re
-                m = re.search(r"(-?[\d,]+\.?\d*)", line.split(":", 1)[-1])
-                if m:
-                    return m.group(1).replace(",", "")
-        return None
-
-    parsed = {
-        "pe_ratio": _find(["pe(x)", "p/e"]),
-        "eps": _find(["eps"], exclude=("change", "p/e", "ratio")),
-        "market_cap": _find(["market capitalization", "market cap"]),
-        "dividend_yield": _find(["dividend"]),
-    }
-
-    if raw.startswith("DSE fundamentals snapshot"):
-        ok, status = True, "OK -- live snapshot fetched from dsebd.org successfully."
-    elif raw.startswith("DSE fundamentals unavailable"):
-        ok, status = False, ("FAILED -- the request to dsebd.org/dse.com.bd itself errored "
-                              "(network, cert, or a block like 403). See raw_response below.")
-    elif raw.startswith("No fundamentals table found"):
-        ok, status = False, ("FAILED -- the page loaded but didn't parse into label:value rows "
-                              "(markup may have changed, or dsebd.org served something other "
-                              "than the real company page).")
     else:
-        ok, status = False, "UNKNOWN -- unexpected response shape, see raw_response below."
-
+        from .data_providers import (
+            get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement,
+            get_stock_data, get_indicators,
+            get_news, get_global_news,
+        )
     return {
-        "ticker": ticker.upper(),
-        "ok": ok,
-        "status": status,
-        "parsed": parsed,
-        # ✅ CHANGED: previously only the wanted_keywords-filtered text was
-        # exposed, which is exactly the subset that WASN'T matching for
-        # P/E ratio and Market Cap -- there was no way to see what
-        # dsebd.org actually calls those fields without live access to
-        # the page. This is the COMPLETE unfiltered {label: value} dict
-        # (every <tr> on the page, not just the keyword-matched ones), so
-        # the real label wording is visible directly in the UI.
-        "all_fields": all_fields or {},
-        "raw_response": raw[:500],
+        "build_instrument_context": build_instrument_context,
+        "get_language_instruction": get_language_instruction,
+        "get_fundamentals": get_fundamentals,
+        "get_balance_sheet": get_balance_sheet,
+        "get_cashflow": get_cashflow,
+        "get_income_statement": get_income_statement,
+        "get_stock_data": get_stock_data,
+        "get_indicators": get_indicators,
+        "get_news": get_news,
+        "get_global_news": get_global_news,
     }
 
 
-def get_balance_sheet(ticker: str, freq: str = "annual", curr_date: str = None):
-    """Full balance sheet, extracted from the audited annual report PDF."""
-    return _stmt.get_statement(ticker, "balance_sheet", freq=freq, curr_date=curr_date)
+def _sentiment_tools():
+    """✅ CHANGED: Finnhub-based get_stock_news_sentiment (from
+    .data_providers) is now the primary source, tried first. Reddit/
+    StockTwits sources from tradingagents (real, working dataflows in this
+    vendored copy — not a black box) are kept as additional signal if
+    available; each is independently optional."""
+    tools = {}
+    from .data_providers import get_stock_news_sentiment
+    tools["get_stock_news_sentiment"] = get_stock_news_sentiment
+
+    names = ["get_reddit_news", "get_reddit_global_news", "get_news_sentiment"]
+    for n in names:
+        try:
+            mod = __import__("tradingagents.agents.utils.agent_utils",
+                             fromlist=[n])
+            tools[n] = getattr(mod, n)
+        except (ImportError, AttributeError):
+            pass
+    return tools
 
 
-def get_cashflow(ticker: str, freq: str = "annual", curr_date: str = None):
-    """Full cash flow statement, extracted from the audited annual report PDF."""
-    return _stmt.get_statement(ticker, "cashflow", freq=freq, curr_date=curr_date)
+# ==========================================================================
+# Analyst team
+# ==========================================================================
+def create_fundamentals_analyst(llm, log=print):
+    from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
+    def node(state):
+        current_date = state["trade_date"]
+        company = state["company_of_interest"]
+        U = _ta_utils(company)
+        instrument_context = U["build_instrument_context"](company)
+        log(f"Fetching fundamentals for {company} on {current_date}")
+
+        from tradingagents.dataflows.symbol_utils import is_dse_ticker
+        _is_dse = is_dse_ticker(company)
+        # 🔴 FIXED: get_balance_sheet/get_cashflow/get_income_statement
+        # default to freq="quarterly" at the LangChain tool-wrapper level
+        # (fundamental_data_tools.py) when freq isn't passed explicitly.
+        # dse_statement_extractor.get_statement() only ever populates data
+        # from annual-report PDFs -- passing freq="quarterly" doesn't
+        # change WHICH data it returns, only the dict key it's wrapped
+        # under ("quarterlyReports" instead of "annualReports"), which is
+        # harmless for extract_dict_numbers (keys inside that don't care
+        # about the wrapper), but is still the wrong semantic label and
+        # worth being explicit about now that this path is being exercised.
+        _stmt_freq = "annual" if _is_dse else "quarterly"
+
+        tool_results = {}
+        for tool_name, tool_fn, args in [
+            ("get_fundamentals", U["get_fundamentals"], {"ticker": company, "curr_date": current_date}),
+            ("get_balance_sheet", U["get_balance_sheet"],
+             {"ticker": company, "freq": _stmt_freq, "curr_date": current_date}),
+            ("get_cashflow", U["get_cashflow"],
+             {"ticker": company, "freq": _stmt_freq, "curr_date": current_date}),
+            ("get_income_statement", U["get_income_statement"],
+             {"ticker": company, "freq": _stmt_freq, "curr_date": current_date}),
+        ]:
+            log(f"calling {tool_name}")
+            try:
+                tool_results[tool_name] = str(tool_fn.invoke(args))[:3000]
+            except Exception as e:  # noqa: BLE001
+                tool_results[tool_name] = f"Error fetching {tool_name}: {e}"
+                log(f"  error {tool_name}: {e}")
+
+        def extract_numbers(raw, keys):
+            results = {}
+            for key in keys:
+                for line in raw.split("\n"):
+                    if key.lower() in line.lower():
+                        nums = re.findall(r"-?\d+\.?\d*e?[+-]?\d*", line)
+                        nums = [float(n) for n in nums if abs(float(n)) > 1000]
+                        if nums:
+                            results[key] = nums[0]
+                            break
+            return results
+
+        def extract_dict_numbers(raw, keys):
+            """dse_statement_extractor.get_statement() returns a Python dict,
+            which `str(tool_fn.invoke(args))` turns into a *single-line* repr
+            (no newlines) -- unlike yfinance's DataFrame str() output, which
+            is naturally one row per line. extract_numbers() above scans
+            "per line" and grabs whichever large number appears first on that
+            line; on a single-line dict repr that means every key would
+            silently resolve to the SAME number instead of honestly showing
+            N/A. Anchor directly on `'key': value` so each key only ever
+            matches its own value."""
+            results = {}
+            for key in keys:
+                m = re.search(rf"['\"]{re.escape(key)}['\"]\s*:\s*(-?[\d.]+)", raw)
+                if m:
+                    try:
+                        results[key] = float(m.group(1))
+                    except ValueError:
+                        continue
+            return results
+
+        def fmt(n):
+            try:
+                n = float(n)
+                if abs(n) >= 1e9:
+                    return f"${n / 1e9:.2f}B"
+                if abs(n) >= 1e6:
+                    return f"${n / 1e6:.1f}M"
+                return f"${n:,.0f}"
+            except Exception:  # noqa: BLE001
+                return str(n)
+
+        fund = tool_results["get_fundamentals"]
+        inc = tool_results["get_income_statement"]
+        cf = tool_results["get_cashflow"]
+        bs = tool_results["get_balance_sheet"]
+
+        def g(pattern, raw):
+            m = re.search(pattern, raw)
+            return m.group(1) if m else "N/A"
+
+        if _is_dse:
+            # ✅ FIXED: dsebd.org's snapshot (dse_fundamentals.py) and the
+            # PDF-extracted statements (dse_statement_extractor.py) use their
+            # own label/key conventions, not yfinance/Alpha Vantage's. The
+            # fixed regex patterns in the `else` branch below (e.g. "PE Ratio",
+            # "Market Cap", "Total Revenue") never matched DSE output, so
+            # every field silently fell back to "N/A" for BD tickers. This
+            # branch parses the actual DSE formats instead of assuming a
+            # US-vendor shape.
+
+            def g_dse(keywords, raw, exclude=()):
+                """Scan the DSE snapshot's `Label: Value` lines for a keyword
+                substring (mirrors the same keyword-matching dse_fundamentals.py
+                itself uses to pick fields off dsebd.org, since dsebd.org's
+                exact label wording isn't guaranteed / can drift) and pull the
+                first number out of that line."""
+                for line in raw.split("\n"):
+                    low = line.lower()
+                    if any(k in low for k in keywords) and not any(e in low for e in exclude):
+                        m = re.search(r"(-?[\d,]+\.?\d*)", line.split(":", 1)[-1])
+                        if m:
+                            return m.group(1).replace(",", "")
+                return "N/A"
+
+            pe_val = g_dse(["pe(x)", "p/e"], fund)
+            eps_val = g_dse(["eps"], fund, exclude=("change", "p/e", "ratio"))
+            mcap_val = g_dse(["market capitalization", "market cap"], fund)
+            div_val = g_dse(["dividend"], fund)
+            # Not published on the DSE snapshot page at all -- left N/A
+            # rather than guessed, per the "never invent data" rule below.
+            rev_val = "N/A"
+            beta_val = "N/A"
+            hi52_val = "N/A"
+            lo52_val = "N/A"
+            sma50_val = "N/A"
+
+            # dse_statement_extractor.py returns an Alpha-Vantage-*shaped*
+            # dict but with its own camelCase keys (see STATEMENT_SCHEMAS) --
+            # "Total Revenue" etc. never existed in that JSON, so
+            # extract_numbers was searching for the wrong keys entirely.
+            # Net Debt / Free Cash Flow aren't literal fields in the DSE
+            # schema at all, so derive them from the fields that are
+            # (long+short term debt; operating cash flow minus capex).
+            inc_rows = extract_dict_numbers(inc, ["totalRevenue", "grossProfit", "operatingIncome",
+                                                  "netIncome", "ebitda"])
+            cf_rows = extract_dict_numbers(cf, ["operatingCashflow", "capitalExpenditures"])
+            bs_rows = extract_dict_numbers(bs, ["longTermDebt", "shortTermDebt", "cashAndCashEquivalents"])
+
+            net_income_val = fmt(inc_rows.get("netIncome", "N/A"))
+            gross_profit_val = fmt(inc_rows.get("grossProfit", "N/A"))
+            operating_income_val = fmt(inc_rows.get("operatingIncome", "N/A"))
+            ebitda_val = fmt(inc_rows.get("ebitda", "N/A"))
+
+            total_debt_num = None
+            if "longTermDebt" in bs_rows or "shortTermDebt" in bs_rows:
+                total_debt_num = bs_rows.get("longTermDebt", 0.0) + bs_rows.get("shortTermDebt", 0.0)
+            net_debt_num = (
+                total_debt_num - bs_rows["cashAndCashEquivalents"]
+                if total_debt_num is not None and "cashAndCashEquivalents" in bs_rows
+                else None
+            )
+            fcf_num = (
+                cf_rows["operatingCashflow"] - cf_rows["capitalExpenditures"]
+                if "operatingCashflow" in cf_rows and "capitalExpenditures" in cf_rows
+                else None
+            )
+            free_cash_flow_val = fmt(fcf_num) if fcf_num is not None else "N/A"
+            buybacks_val = "N/A"  # not a field the DSE schema exposes
+            net_debt_val = fmt(net_debt_num) if net_debt_num is not None else "N/A"
+            total_debt_val = fmt(total_debt_num) if total_debt_num is not None else "N/A"
+        else:
+            pe_val = g(r"PE Ratio.*?:\s*([\d.]+)", fund)
+            eps_val = g(r"EPS \(TTM\).*?:\s*([\d.]+)", fund)
+            mcap = re.search(r"Market Cap.*?:\s*([\d.]+)", fund)
+            rev_ttm = re.search(r"Revenue \(TTM\).*?:\s*([\d.]+)", fund)
+            mcap_val = fmt(mcap.group(1)) if mcap else "N/A"
+            rev_val = fmt(rev_ttm.group(1)) if rev_ttm else "N/A"
+            beta_val = g(r"Beta.*?:\s*([\d.]+)", fund)
+            div_val = g(r"Dividend Yield.*?:\s*([\d.]+)", fund)
+            hi52_val = g(r"52 Week High.*?:\s*([\d.]+)", fund)
+            lo52_val = g(r"52 Week Low.*?:\s*([\d.]+)", fund)
+            sma50_val = g(r"50 Day Average.*?:\s*([\d.]+)", fund)
+
+            inc_rows = extract_numbers(inc, ["Total Revenue", "Gross Profit", "Operating Income",
+                                             "Net Income From Continuing", "Normalized EBITDA"])
+            cf_rows = extract_numbers(cf, ["Free Cash Flow", "Repurchase Of Capital Stock"])
+            bs_rows = extract_numbers(bs, ["Net Debt", "Total Debt", "Cash And Cash Equivalents"])
+
+            net_income_val = fmt(inc_rows.get("Net Income From Continuing", "N/A"))
+            gross_profit_val = fmt(inc_rows.get("Gross Profit", "N/A"))
+            operating_income_val = fmt(inc_rows.get("Operating Income", "N/A"))
+            ebitda_val = fmt(inc_rows.get("Normalized EBITDA", "N/A"))
+            free_cash_flow_val = fmt(cf_rows.get("Free Cash Flow", "N/A"))
+            buybacks_val = fmt(cf_rows.get("Repurchase Of Capital Stock", "N/A"))
+            net_debt_val = fmt(bs_rows.get("Net Debt", "N/A"))
+            total_debt_val = fmt(bs_rows.get("Total Debt", "N/A"))
+
+        data_summary = f"""
+COMPANY: {company} | DATE: {current_date}
+
+MARKET DATA (TTM):
+- Market Cap: {mcap_val}
+- P/E Ratio: {pe_val}
+- EPS (TTM): {eps_val}
+- Revenue (TTM): {rev_val}
+- Beta: {beta_val}
+- Dividend Yield: {div_val}%
+- 52-Week Range: {lo52_val} - {hi52_val}
+- 50-Day SMA: {sma50_val}
+
+MOST RECENT QUARTER (income statement):
+- Net Income: {net_income_val}
+- Gross Profit: {gross_profit_val}
+- Operating Income: {operating_income_val}
+- EBITDA: {ebitda_val}
+
+CASH FLOW (most recent quarter):
+- Free Cash Flow: {free_cash_flow_val}
+- Stock Buybacks: {buybacks_val}
+
+BALANCE SHEET (most recent quarter):
+- Net Debt: {net_debt_val}
+- Total Debt: {total_debt_val}
+"""
+
+        prompt = f"""You are a senior financial analyst. Today is {current_date}.
+
+Write a professional fundamental analysis report for {company} using ONLY the data below.
+Structure: Company Overview -> Profitability -> Balance Sheet -> Cash Flow -> Risks -> Outlook
+End with a Markdown table and: FINAL TRANSACTION PROPOSAL: **BUY** / **HOLD** / **SELL**
+
+RULES:
+- Use ONLY the numbers below. Do NOT invent any figures.
+- If a metric shows N/A, say "data not available".
+
+{data_summary}
+""" + U["get_language_instruction"]()
+
+        messages = [
+            SystemMessage(content="You are a financial analyst. Use ONLY the provided numbers. Never invent data."),
+            HumanMessage(content=prompt),
+        ]
+        report = invoke_llm_with_retry(llm, messages).content
+        log("fundamentals report ready")
+
+        fund_metrics = {
+            "market_cap": mcap_val, "pe_ratio": pe_val, "eps_ttm": eps_val,
+            "revenue_ttm": rev_val, "beta": beta_val, "dividend_yield": div_val,
+            "52w_high": hi52_val, "52w_low": lo52_val, "50d_sma": sma50_val,
+            "net_income_q": net_income_val,
+            "gross_profit_q": gross_profit_val,
+            "operating_income_q": operating_income_val,
+            "ebitda_q": ebitda_val,
+            "free_cash_flow_q": free_cash_flow_val,
+            "net_debt": net_debt_val,
+            "total_debt": total_debt_val,
+        }
+        # 🔧 TEMP DEBUG: surfaces what get_fundamentals actually returned,
+        # right in the same "metrics" panel you already screenshot -- no
+        # need to dig through Railway logs. If everything above is N/A,
+        # this field tells us why in one look:
+        #   - starts with "DSE fundamentals unavailable for..." -> the
+        #     dsebd.org request itself failed (network/cert/blocked)
+        #   - starts with "No fundamentals table found for..." -> the page
+        #     loaded but didn't parse into label:value rows (structure
+        #     changed, or dsebd.org served something other than the real
+        #     company page, e.g. a block/interstitial page)
+        #   - starts with "Error fetching get_fundamentals:" -> the tool
+        #     call itself raised an exception
+        #   - starts with "DSE fundamentals snapshot --" and has PE(x)/EPS/
+        #     Market Capitalization lines -> the fetch worked fine and the
+        #     issue is elsewhere (label wording g_dse doesn't recognize)
+        # Remove this key once the real cause is confirmed and fixed.
+        fund_metrics["_debug_raw_fundamentals"] = str(fund)[:250]
+        if _is_dse:
+            fund_metrics["_debug_raw_balance_sheet"] = str(bs)[:250]
+        return {"fundamentals_report": report, "fund_metrics": fund_metrics}
+
+    return node
 
 
-def get_income_statement(ticker: str, freq: str = "annual", curr_date: str = None):
-    """Full income statement, extracted from the audited annual report PDF."""
-    return _stmt.get_statement(ticker, "income_statement", freq=freq, curr_date=curr_date)
+def create_market_analyst(llm, indicators_list, log=print):
+    from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+    from datetime import datetime, timedelta
+
+    def node(state):
+        current_date = state["trade_date"]
+        company = state["company_of_interest"]
+        U = _ta_utils(company)
+        asset_type = state.get("asset_type", "stock")
+        instrument_context = U["build_instrument_context"](company, asset_type)
+        log(f"Fetching market data for {company} on {current_date}")
+
+        end_dt = datetime.strptime(current_date, "%Y-%m-%d")
+        start_date = (end_dt - timedelta(days=30)).strftime("%Y-%m-%d")
+
+        log("calling get_stock_data")
+        try:
+            stock_data = str(U["get_stock_data"].invoke({
+                "symbol": company, "start_date": start_date, "end_date": current_date,
+            }))[:2000]
+        except Exception as e:  # noqa: BLE001
+            stock_data = f"Error: {e}"
+
+        log("calling get_indicators")
+        ind_parts = []
+        for ind_name in indicators_list:
+            try:
+                val = U["get_indicators"].invoke({
+                    "symbol": company, "indicator": ind_name, "curr_date": current_date,
+                })
+                ind_parts.append(f"{ind_name}: {str(val)[:300]}")
+            except Exception as ie:  # noqa: BLE001
+                ind_parts.append(f"{ind_name}: Error - {str(ie)[:100]}")
+        indicators_str = "\n".join(ind_parts)
+
+        def _extract(raw_str):
+            for line in raw_str.split("\n"):
+                line = line.strip()
+                if re.match(r"\d{4}-\d{2}-\d{2}:", line) and "N/A" not in line:
+                    m = re.search(r":\s*(-?\d+\.?\d+)", line)
+                    if m:
+                        return float(m.group(1))
+            return None
+
+        indicators_dict = {}
+        for item in ind_parts:
+            if ": " in item:
+                k, _, v = item.partition(": ")
+                val = _extract(v)
+                indicators_dict[k.strip()] = val if val is not None else v.strip()[:100]
+
+        prompt = f"""You are a trading analyst. Today is {current_date}.
+{instrument_context}
+
+Using the REAL data below, write a brief technical analysis report for {company}.
+Include RSI, MACD, Bollinger Bands, SMA analysis.
+
+At the very end, output a Markdown table with EXACTLY these columns:
+| Indicator | Value | Signal | Interpretation |
+
+=== STOCK PRICE DATA ===
+{stock_data}
+
+=== TECHNICAL INDICATORS ===
+{indicators_str}
+""" + U["get_language_instruction"]()
+
+        messages = [
+            SystemMessage(content="You are a senior trading analyst. Write reports based only on provided data. Always end with the required Markdown table."),
+            HumanMessage(content=prompt),
+        ]
+        report = invoke_llm_with_retry(llm, messages).content
+        log("market report ready")
+
+        return {
+            "market_report": report,
+            "indicators_parsed": indicators_dict,
+            "market_raw_data": {"stock_data": stock_data, "indicators": indicators_dict},
+        }
+
+    return node
 
 
-# ---------------------------------------------------------------------------
-# Wiring into your existing vendor architecture (interface.py / config.py):
-#
-#   from .dse_fundamentals import (
-#       get_balance_sheet as get_dse_balance_sheet,
-#       get_cashflow as get_dse_cashflow,
-#       get_fundamentals as get_dse_fundamentals,
-#       get_income_statement as get_dse_income_statement,
-#   )
-#
-# Then add "dse" alongside "alpha_vantage" / "yfinance" wherever
-# route_to_vendor dispatches on config["data_vendors"]["fundamental_data"],
-# and set that config value to "dse" for BD tickers (e.g. via your
-# symbol_utils.py ticker normalization -- DSE trading codes like
-# "SQURPHARMA" or "GP" won't match a US ticker pattern, so you can branch
-# on that to pick the vendor automatically).
-# ---------------------------------------------------------------------------
+def create_news_analyst(llm, log=print):
+    from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+    from datetime import datetime, timedelta
+
+    def node(state):
+        current_date = state["trade_date"]
+        company = state["company_of_interest"]
+        U = _ta_utils(company)
+        asset_type = state.get("asset_type", "stock")
+        instrument_context = U["build_instrument_context"](company, asset_type)
+        log(f"Fetching news for {company} on {current_date}")
+
+        log("calling get_news")
+        try:
+            end_dt = datetime.strptime(current_date, "%Y-%m-%d")
+            start_dt = end_dt - timedelta(days=7)
+            company_news = str(U["get_news"].invoke({
+                "ticker": company, "start_date": start_dt.strftime("%Y-%m-%d"),
+                "end_date": current_date,
+            }))[:3000]
+        except Exception as e:  # noqa: BLE001
+            company_news = f"Error: {e}"
+
+        log("calling get_global_news")
+        try:
+            global_news = str(U["get_global_news"].invoke({"curr_date": current_date}))[:2000]
+        except Exception as e:  # noqa: BLE001
+            global_news = f"Error: {e}"
+
+        prompt = f"""You are a news analyst. Today is {current_date}.
+{instrument_context}
+
+Using the REAL news data below, write a brief news analysis report for {company}.
+Sections: Company News Summary -> Global Macro Trends -> Sentiment Assessment -> Key Risks
+
+At the very end, output a Markdown table with EXACTLY these 5 columns:
+| Category | Headline | Sentiment | Impact | Source |
+(Fill 4-6 rows. Sentiment must be POSITIVE / NEGATIVE / NEUTRAL.)
+
+=== COMPANY NEWS ({company}) ===
+{company_news}
+
+=== GLOBAL MARKET NEWS ===
+{global_news}
+""" + U["get_language_instruction"]()
+
+        messages = [
+            SystemMessage(content="You are a senior news analyst. Write reports based only on provided data. Always end with the required Markdown table."),
+            HumanMessage(content=prompt),
+        ]
+        report = invoke_llm_with_retry(llm, messages).content
+        log("news report ready")
+
+        sentiments = re.findall(r"\|\s*\w.*?\|\s*(POSITIVE|NEGATIVE|NEUTRAL)\s*\|", report, re.IGNORECASE)
+        pos = sum(1 for s in sentiments if "POSITIVE" in s.upper())
+        neg = sum(1 for s in sentiments if "NEGATIVE" in s.upper())
+        neu = sum(1 for s in sentiments if "NEUTRAL" in s.upper())
+        overall_m = re.search(r"(POSITIVE|NEGATIVE|NEUTRAL|BULLISH|BEARISH)", report, re.IGNORECASE)
+        overall = overall_m.group(1).upper() if overall_m else "NEUTRAL"
+        tbl_m = re.search(r"(\|.*?Category.*?\|.*?(?:\n\|[-| ]+\|)(?:\n\|.*?\|)+)", report, re.IGNORECASE | re.DOTALL)
+
+        news_metrics = {
+            "positive_count": pos, "negative_count": neg, "neutral_count": neu,
+            "overall_sentiment": overall,
+            "company_news_chars": len(company_news), "global_news_chars": len(global_news),
+        }
+        return {
+            "news_report": report, "news_metrics": news_metrics,
+            "news_table_md": tbl_m.group(1) if tbl_m else "",
+            "news_raw": {"company_news": company_news, "global_news": global_news},
+        }
+
+    return node
+
+
+def create_sentiment_analyst(llm, log=print):
+    from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+    U = _ta_utils()
+    tools = _sentiment_tools()
+
+    def node(state):
+        current_date = state["trade_date"]
+        company = state["company_of_interest"]
+        log(f"Fetching sentiment for {company} on {current_date}")
+
+        sentiment_data = {}
+        arg_patterns = [
+            {"ticker": company, "curr_date": current_date},
+            {"symbol": company, "curr_date": current_date},
+            {"ticker": company, "start_date": current_date},
+        ]
+        for tool_name, tool_fn in tools.items():
+            log(f"calling {tool_name}")
+            got = False
+            for args in arg_patterns:
+                try:
+                    sentiment_data[tool_name] = str(tool_fn.invoke(args))[:2000]
+                    got = True
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+            if not got:
+                sentiment_data[tool_name] = "No data available"
+
+        news_context = str(state.get("news_report", ""))[:1000]
+        data_sections = ""
+        for tool_name, data in sentiment_data.items():
+            data_sections += f"\n=== {tool_name.upper()} ===\n{data}\n"
+        if not data_sections.strip() or all(v == "No data available" for v in sentiment_data.values()):
+            data_sections = "No direct sentiment API data available. Use news report for inference."
+
+        prompt = f"""You are a sentiment analyst. Today is {current_date}.
+IMPORTANT: Base your analysis ONLY on the data below. Do NOT invent scores.
+
+Analyze market sentiment for {company}.
+Sections: Data Source Review -> Score Breakdown -> Key Signals -> Confidence Assessment
+
+At the very end, output a Markdown table with EXACTLY these columns:
+| Source | Sentiment | Score (1-10) | Confidence | Key Signal |
+
+=== SENTIMENT DATA ===
+{data_sections}
+
+=== NEWS CONTEXT ===
+{news_context}
+""" + U["get_language_instruction"]()
+
+        messages = [
+            SystemMessage(content="You are a senior sentiment analyst. Be specific about data sources. Always end with the required Markdown table."),
+            HumanMessage(content=prompt),
+        ]
+        report = invoke_llm_with_retry(llm, messages).content
+        log("sentiment report ready")
+
+        score_m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*10", report)
+        conf_m = re.search(r"(High|Medium|Low)\s*[Cc]onfidence", report)
+        overall_m = re.search(r"(BULLISH|BEARISH|NEUTRAL|POSITIVE|NEGATIVE)", report, re.IGNORECASE)
+        sentiment_metrics = {
+            "score": score_m.group(1) if score_m else "N/A",
+            "confidence": conf_m.group(1) if conf_m else "N/A",
+            "overall": overall_m.group(1).upper() if overall_m else "NEUTRAL",
+        }
+        return {"sentiment_report": report, "sentiment_metrics": sentiment_metrics}
+
+    return node
+
+
+# ==========================================================================
+# Investment debate (bull / bear / facilitator)
+# ==========================================================================
+def _reports(state):
+    return (
+        str(state["market_report"])[:500], str(state["sentiment_report"])[:500],
+        str(state["news_report"])[:500], str(state["fundamentals_report"])[:500],
+    )
+
+
+def create_bull_researcher(llm):
+    U = _ta_utils()
+
+    def node(state):
+        ds = state["investment_debate_state"]
+        market, sentiment, news, fundamentals = _reports(state)
+        prompt = f"""IMPORTANT: Use ONLY the data in the reports below. Do NOT invent facts or figures.
+You are a Bull Analyst advocating for investing in the stock.
+Market report: {market}
+Sentiment report: {sentiment}
+News report: {news}
+Fundamentals report: {fundamentals}
+Debate history: {ds.get('history', '')}
+Last bear argument: {ds.get('current_response', '')}
+Present a compelling bull argument with specific growth opportunities and strengths.
+""" + U["get_language_instruction"]()
+        argument = f"Bull Analyst: {invoke_llm_with_retry(llm, prompt).content}"
+        return {"investment_debate_state": {
+            "history": ds.get("history", "") + "\n" + argument,
+            "bull_history": ds.get("bull_history", "") + "\n" + argument,
+            "bear_history": ds.get("bear_history", ""),
+            "current_response": argument,
+            "count": ds["count"] + 1,
+        }}
+
+    return node
+
+
+def create_bear_researcher(llm):
+    U = _ta_utils()
+
+    def node(state):
+        ds = state["investment_debate_state"]
+        market, sentiment, news, fundamentals = _reports(state)
+        prompt = f"""IMPORTANT: Use ONLY the data in the reports below. Do NOT invent facts or figures.
+You are a Bear Analyst making the case against investing in the stock.
+Market report: {market}
+Sentiment report: {sentiment}
+News report: {news}
+Fundamentals report: {fundamentals}
+Debate history: {ds.get('history', '')}
+Last bull argument: {ds.get('current_response', '')}
+Present a compelling bear argument with specific risks and weaknesses.
+""" + U["get_language_instruction"]()
+        argument = f"Bear Analyst: {invoke_llm_with_retry(llm, prompt).content}"
+        return {"investment_debate_state": {
+            "history": ds.get("history", "") + "\n" + argument,
+            "bear_history": ds.get("bear_history", "") + "\n" + argument,
+            "bull_history": ds.get("bull_history", ""),
+            "current_response": argument,
+            "count": ds["count"] + 1,
+        }}
+
+    return node
+
+
+def create_investment_facilitator(llm):
+    U = _ta_utils()
+
+    def node(state):
+        ds = state["investment_debate_state"]
+        prompt = f"""IMPORTANT: Base your evaluation ONLY on the debate history provided below. Do NOT add external knowledge.
+You are the Investment Debate Facilitator. Your job is to:
+1. Review the full debate between Bull and Bear analysts
+2. Objectively evaluate which side presented stronger evidence
+3. Declare a WINNER with clear reasoning
+4. Provide a final investment recommendation
+
+Full Debate History:
+{ds.get('history', '')}
+
+Total arguments made: {ds.get('count', 0)}
+
+Declare: BULL WINS / BEAR WINS / DRAW
+Then give your final recommendation: BUY / SELL / HOLD with confidence level (High/Medium/Low).
+""" + U["get_language_instruction"]()
+        decision = invoke_llm_with_retry(llm, prompt).content
+        return {"investment_facilitator_decision": decision,
+                "investment_debate_state": {**ds, "facilitator_decision": decision}}
+
+    return node
+
+
+# ==========================================================================
+# Trader (structured)
+# ==========================================================================
+def create_trader(llm):
+    from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
+    from tradingagents.agents.utils.agent_utils import build_instrument_context, get_language_instruction
+    from tradingagents.agents.utils.structured import bind_structured, invoke_structured_or_freetext
+
+    structured_llm = bind_structured(llm, TraderProposal, "Trader")
+
+    def node(state):
+        company_name = state["company_of_interest"]
+        asset_type = state.get("asset_type", "stock")
+        instrument_context = build_instrument_context(company_name, asset_type)
+        investment_plan = state["investment_plan"]
+
+        messages = [
+            {"role": "system", "content": (
+                "You are a trading agent analyzing market data to make investment decisions. "
+                "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
+                "Anchor your reasoning in the analysts' reports and the research plan."
+                + get_language_instruction())},
+            {"role": "user", "content": (
+                f"Based on a comprehensive analysis by a team of analysts, here is an investment "
+                f"plan tailored for {company_name}. {instrument_context} This plan incorporates "
+                f"insights from current technical market trends, macroeconomic indicators, and "
+                f"social media sentiment. Use this plan as a foundation for evaluating your next "
+                f"trading decision.\n\nProposed Investment Plan: {investment_plan}\n\n"
+                f"Leverage these insights to make an informed and strategic decision.")},
+        ]
+
+        trader_plan = None
+        for attempt in range(3):
+            try:
+                trader_plan = invoke_structured_or_freetext(
+                    structured_llm, llm, messages, render_trader_proposal, "Trader")
+                break
+            except Exception as e:  # noqa: BLE001
+                if "429" in str(e) or "rate_limit" in str(e).lower():
+                    time.sleep(60 * (attempt + 1))
+                else:
+                    raise
+        return {"trader_investment_plan": trader_plan, "sender": "Trader"}
+
+    return node
+
+
+# ==========================================================================
+# Risk debate (aggressive / conservative / neutral / facilitator)
+# ==========================================================================
+def _risk_reports(state):
+    return (
+        str(state["market_report"])[:500], str(state["sentiment_report"])[:500],
+        str(state["news_report"])[:500], str(state["fundamentals_report"])[:500],
+        str(state["trader_investment_plan"])[:500],
+    )
+
+
+def create_aggressive_debator(llm):
+    U = _ta_utils()
+
+    def node(state):
+        rd = state["risk_debate_state"]
+        market, sentiment, news, fundamentals, trader = _risk_reports(state)
+        prompt = f"""IMPORTANT: Use ONLY the analyst reports provided. Do NOT invent figures.
+As the Aggressive Risk Analyst, champion high-reward opportunities.
+Trader decision: {trader}
+Market Report: {market}
+Sentiment: {sentiment}
+News: {news}
+Fundamentals: {fundamentals}
+History: {rd.get('history', '')}
+Conservative argument: {rd.get('current_conservative_response', '')}
+Neutral argument: {rd.get('current_neutral_response', '')}
+Make a compelling case for high-risk high-reward approach. Speak conversationally.
+""" + U["get_language_instruction"]()
+        argument = f"Aggressive Analyst: {invoke_llm_with_retry(llm, prompt).content}"
+        return {"risk_debate_state": {**rd,
+            "history": rd.get("history", "") + "\n" + argument,
+            "aggressive_history": rd.get("aggressive_history", "") + "\n" + argument,
+            "latest_speaker": "Aggressive",
+            "current_aggressive_response": argument,
+            "count": rd["count"] + 1}}
+
+    return node
+
+
+def create_conservative_debator(llm):
+    U = _ta_utils()
+
+    def node(state):
+        rd = state["risk_debate_state"]
+        market, sentiment, news, fundamentals, trader = _risk_reports(state)
+        prompt = f"""IMPORTANT: Use ONLY the analyst reports provided. Do NOT invent figures.
+As the Conservative Risk Analyst, protect assets and minimize risk.
+Trader decision: {trader}
+Market Report: {market}
+Sentiment: {sentiment}
+News: {news}
+Fundamentals: {fundamentals}
+History: {rd.get('history', '')}
+Aggressive argument: {rd.get('current_aggressive_response', '')}
+Neutral argument: {rd.get('current_neutral_response', '')}
+Make a compelling case for low-risk conservative approach. Speak conversationally.
+""" + U["get_language_instruction"]()
+        argument = f"Conservative Analyst: {invoke_llm_with_retry(llm, prompt).content}"
+        return {"risk_debate_state": {**rd,
+            "history": rd.get("history", "") + "\n" + argument,
+            "conservative_history": rd.get("conservative_history", "") + "\n" + argument,
+            "latest_speaker": "Conservative",
+            "current_conservative_response": argument,
+            "count": rd["count"] + 1}}
+
+    return node
+
+
+def create_neutral_debator(llm):
+    U = _ta_utils()
+
+    def node(state):
+        rd = state["risk_debate_state"]
+        market, sentiment, news, fundamentals, trader = _risk_reports(state)
+        prompt = f"""IMPORTANT: Use ONLY the analyst reports provided. Do NOT invent figures.
+As the Neutral Risk Analyst, provide a balanced perspective.
+Trader decision: {trader}
+Market Report: {market}
+Sentiment: {sentiment}
+News: {news}
+Fundamentals: {fundamentals}
+History: {rd.get('history', '')}
+Aggressive argument: {rd.get('current_aggressive_response', '')}
+Conservative argument: {rd.get('current_conservative_response', '')}
+Provide a balanced moderate view. Speak conversationally.
+""" + U["get_language_instruction"]()
+        argument = f"Neutral Analyst: {invoke_llm_with_retry(llm, prompt).content}"
+        return {"risk_debate_state": {**rd,
+            "history": rd.get("history", "") + "\n" + argument,
+            "neutral_history": rd.get("neutral_history", "") + "\n" + argument,
+            "latest_speaker": "Neutral",
+            "current_neutral_response": argument,
+            "count": rd["count"] + 1}}
+
+    return node
+
+
+def create_risk_facilitator(llm):
+    U = _ta_utils()
+
+    def node(state):
+        rd = state["risk_debate_state"]
+        trader_decision = str(state.get("trader_investment_plan", ""))[:500]
+        prompt = f"""IMPORTANT: Base your assessment ONLY on the debate history provided. Do NOT use external knowledge.
+You are the Risk Management Debate Facilitator.
+
+Trader's Original Decision: {trader_decision}
+
+After {rd.get('count', 0)} total arguments across the rounds, evaluate the risk debate:
+
+Aggressive Analyst Summary:
+{rd.get('aggressive_history', '')[-800:]}
+
+Conservative Analyst Summary:
+{rd.get('conservative_history', '')[-800:]}
+
+Neutral Analyst Summary:
+{rd.get('neutral_history', '')[-800:]}
+
+Your tasks:
+1. Declare which risk perspective was most compelling: AGGRESSIVE / CONSERVATIVE / NEUTRAL
+2. Synthesize a final risk assessment
+3. Provide position sizing recommendation (e.g., 25% / 50% / 75% of portfolio)
+4. Set stop-loss and take-profit levels based on the debate outcome
+5. Final risk rating: LOW / MEDIUM / HIGH
+
+Be specific and data-driven in your assessment.
+""" + U["get_language_instruction"]()
+        decision = invoke_llm_with_retry(llm, prompt).content
+        return {"risk_facilitator_decision": decision,
+                "risk_debate_state": {**rd, "facilitator_decision": decision}}
+
+    return node
+
+
+# ==========================================================================
+# Portfolio manager (structured, final decision)
+# ==========================================================================
+def create_portfolio_manager(llm):
+    from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
+    from tradingagents.agents.utils.agent_utils import build_instrument_context, get_language_instruction
+    from tradingagents.agents.utils.structured import bind_structured, invoke_structured_or_freetext
+
+    structured_llm = bind_structured(llm, PortfolioDecision, "PortfolioManager")
+
+    def node(state):
+        company_name = state["company_of_interest"]
+        asset_type = state.get("asset_type", "stock")
+        instrument_context = build_instrument_context(company_name, asset_type)
+        risk_history = state["risk_debate_state"].get("history", "")
+        trader_plan = state.get("trader_investment_plan", "")
+        past_context = state.get("past_context", "")
+        investor_profile = state.get("investor_profile", "Aggressive")
+
+        prompt_text = (
+            f"You are the Portfolio Manager making the final investment decision for {company_name}. "
+            f"{instrument_context}\n\n"
+            f"Investor Profile: {investor_profile}\n\n"
+            f"Review the risk analysts' debate and the trader's proposal, "
+            f"then issue a final rating tailored to this investor profile.\n\n"
+            f"Trader Proposal:\n{trader_plan[:800]}\n\n"
+            f"Risk Analysts Debate:\n{risk_history[:1500]}\n\n"
+        )
+        if past_context:
+            prompt_text += f"Past context:\n{past_context}\n\n"
+        prompt_text += get_language_instruction()
+
+        messages = [
+            {"role": "system", "content": "You are a senior portfolio manager. Issue a final decision."},
+            {"role": "user", "content": prompt_text},
+        ]
+        final_decision = None
+        for attempt in range(3):
+            try:
+                final_decision = invoke_structured_or_freetext(
+                    structured_llm, llm, messages, render_pm_decision, "PortfolioManager")
+                break
+            except Exception as e:  # noqa: BLE001
+                if "429" in str(e) or "rate_limit" in str(e).lower():
+                    time.sleep(60 * (attempt + 1))
+                else:
+                    raise
+        return {"final_trade_decision": final_decision}
+
+    return node
+
+
+# ==========================================================================
+# Macro Regime Analyst — market-wide risk regime (VIX / 10Y yield / DXY)
+# ==========================================================================
+MACRO_TICKERS = {
+    "vix": "^VIX",       # fear gauge
+    "tnx": "^TNX",       # 10Y treasury yield
+    "dxy": "DX-Y.NYB",   # US dollar index
+}
+
+
+def fetch_macro_snapshot(as_of_date: str, lookback_days: int = 30) -> dict:
+    """Latest VIX / 10Y yield / DXY plus their lookback-period average."""
+    import yfinance as yf
+    from datetime import datetime, timedelta
+
+    end_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
+    start_dt = end_dt - timedelta(days=lookback_days)
+
+    snapshot: dict = {}
+    for key, ticker in MACRO_TICKERS.items():
+        try:
+            df = yf.download(
+                ticker,
+                start=start_dt.strftime("%Y-%m-%d"),
+                end=(end_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+                progress=False,
+            )
+            if df.empty:
+                snapshot[key] = {"latest": None, "avg": None}
+                continue
+            # newer yfinance can return multi-level columns even for a
+            # single ticker, making df["Close"] a 1-column DataFrame
+            # instead of a Series -> float(Series) crashes. squeeze()
+            # collapses a single column to a Series and is a no-op if it
+            # already is one, so this works across yfinance versions.
+            close = df["Close"].squeeze()
+            latest = float(close.iloc[-1])
+            avg = float(close.mean())
+            snapshot[key] = {"latest": round(latest, 2), "avg": round(avg, 2)}
+        except Exception as e:  # noqa: BLE001
+            snapshot[key] = {"latest": None, "avg": None, "error": str(e)[:100]}
+    return snapshot
+
+
+def classify_macro_regime(snapshot: dict) -> str:
+    """Rule-based macro tag: RISK_OFF_HIGH_VOL / RISK_ON_LOW_VOL /
+    RATES_RISING / RATES_FALLING / NEUTRAL_MACRO. Deliberately separate from
+    the stock-specific `classify_regime` in memory.py — this is market-wide,
+    not ticker-specific, and is stored as its own episode metadata field so
+    it never interferes with existing regime filtering."""
+    vix = (snapshot.get("vix") or {}).get("latest")
+    tnx = (snapshot.get("tnx") or {}).get("latest")
+    tnx_avg = (snapshot.get("tnx") or {}).get("avg")
+
+    if vix is not None:
+        if vix >= 25:
+            return "RISK_OFF_HIGH_VOL"
+        if vix <= 15:
+            return "RISK_ON_LOW_VOL"
+
+    if tnx is not None and tnx_avg is not None and tnx_avg != 0:
+        if tnx > tnx_avg * 1.03:
+            return "RATES_RISING"
+        if tnx < tnx_avg * 0.97:
+            return "RATES_FALLING"
+
+    return "NEUTRAL_MACRO"
+
+
+def create_macro_regime_analyst(llm, log=print):
+    from langchain_core.messages import HumanMessage, SystemMessage
+    U = _ta_utils()
+
+    def node(state):
+        current_date = state["trade_date"]
+        log(f"Fetching macro snapshot for {current_date}")
+
+        snapshot = fetch_macro_snapshot(current_date)
+        macro_regime = classify_macro_regime(snapshot)
+        log(f"VIX={snapshot.get('vix')} 10Y={snapshot.get('tnx')} DXY={snapshot.get('dxy')}")
+        log(f"macro regime: {macro_regime}")
+
+        prompt = f"""You are a macro strategist. Today is {current_date}.
+Using the REAL data below, write a brief (3-4 sentence) macro market regime report.
+Classify whether conditions are risk-on or risk-off, whether rates are rising or
+falling, and what this implies for equity positioning.
+
+=== MACRO SNAPSHOT ===
+VIX (fear gauge):      latest={snapshot.get('vix', {}).get('latest')}, 30d avg={snapshot.get('vix', {}).get('avg')}
+10Y Treasury Yield:    latest={snapshot.get('tnx', {}).get('latest')}, 30d avg={snapshot.get('tnx', {}).get('avg')}
+US Dollar Index (DXY): latest={snapshot.get('dxy', {}).get('latest')}, 30d avg={snapshot.get('dxy', {}).get('avg')}
+
+Rule-based macro regime tag: {macro_regime}
+""" + U["get_language_instruction"]()
+
+        messages = [
+            SystemMessage(content="You are a senior macro strategist. Base your report only on the data given."),
+            HumanMessage(content=prompt),
+        ]
+        report = invoke_llm_with_retry(llm, messages).content
+        log("macro regime report ready")
+
+        return {"macro_report": report, "macro_regime": macro_regime, "macro_snapshot": snapshot}
+
+    return node
+
+
+# ==========================================================================
+# Post-Mortem / Self-Critique — cross-regime review of resolved episodes
+# ==========================================================================
+def _safe_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def run_post_mortem(company: str, memory, llm, log=print) -> tuple[str, int]:
+    """Structured self-critique over ALL of a company's RESOLVED episodes,
+    across every regime — unlike the regime-transition reflection (which
+    only fires on a regime change and only looks at the prior regime), this
+    runs every session so the Trader/Portfolio Manager always see the full
+    track record. Returns (lessons_text, episodes_reviewed)."""
+    episodes = memory.gather_resolved_episodes(company)
+    if not episodes:
+        return "(Post-mortem skipped — no RESOLVED episodes yet.)", 0
+
+    wins = [e for e in episodes if _safe_float(e.get("pnl_pct")) > 0]
+    losses = [e for e in episodes if _safe_float(e.get("pnl_pct")) < 0]
+
+    lines = [
+        f"- {e.get('trade_date', '?')}: Signal={e.get('final_signal', '?')}, "
+        f"Regime={e.get('regime', '?')}, P&L={e.get('pnl_pct', '?')}%, "
+        f"Outcome={e.get('outcome_label', '?')}"
+        for e in episodes
+    ]
+    history_text = "\n".join(lines)
+
+    prompt = (
+        f"You are a trading post-mortem analyst reviewing {company}'s last {len(episodes)} "
+        f"RESOLVED trading decisions across all market regimes:\n\n{history_text}\n\n"
+        f"Win count: {len(wins)}, Loss count: {len(losses)}\n\n"
+        f"In 4-5 concise bullet points, identify:\n"
+        f"1. Any pattern in which regimes/signals tend to lose money.\n"
+        f"2. Whether the system is systematically too aggressive or too conservative.\n"
+        f"3. One concrete process adjustment for future Trader/Portfolio Manager decisions.\n"
+        f"Base this ONLY on the data above — do not invent numbers."
+    )
+    log(f"reviewing {len(episodes)} resolved episodes ({len(wins)}W/{len(losses)}L)")
+    try:
+        result = invoke_llm_with_retry(llm, prompt).content.strip()
+        log("post-mortem ready")
+        return result, len(episodes)
+    except Exception as e:  # noqa: BLE001
+        return f"(Post-mortem LLM call failed: {e})", len(episodes)
+
+
+def create_post_mortem_agent(llm, memory, log=print):
+    def node(state):
+        company = state["company_of_interest"]
+        lessons, n_reviewed = run_post_mortem(company, memory, llm, log=log)
+        return {"post_mortem_lessons": lessons, "post_mortem_n_episodes": n_reviewed}
+
+    return node
+
+
+# ==========================================================================
+# Decision Verifier / Fact-Check — post-decision sanity check
+# ==========================================================================
+# Runs after the Portfolio Manager's final decision. Nine agents chain off
+# each other's output sequentially, so an early hallucination/bad number can
+# propagate all the way to the final call — this catches that in 3 layers:
+#   1) rule-based sanity check   — RSI/news sentiment vs. the final signal
+#   2) numeric contradiction     — DETERMINISTIC (regex + tolerance), not
+#      LLM-judged: a small local model repeatedly misjudged decimal
+#      rounding as a "genuine difference" (e.g. 68.17 vs 68.16905...), so
+#      arithmetic comparison is never handed to the LLM.
+#   3) LLM semantic check        — ADVISORY ONLY (SIGNAL_CONSISTENT y/n).
+#      The 7B model over-triggered on ordinary hedge/caveat language, so
+#      this alone can never flip status to FLAGGED.
+def rule_based_checks(final_signal: str, indicators: dict, news_metrics: dict,
+                      fundamentals_report: str = "") -> tuple[list[str], list[str]]:
+    """Returns (warnings, info_notes). Warnings flag status; info_notes are
+    shown for transparency but never change status."""
+    warnings: list[str] = []
+    info_notes: list[str] = []
+
+    fund_verdict = extract_final_proposal(fundamentals_report)
+    fund_verdict_upper = fund_verdict.upper() if fund_verdict else ""
+    fund_agrees_with_final = bool(fund_verdict) and final_signal in fund_verdict_upper
+
+    def _add(msg: str):
+        (info_notes if fund_agrees_with_final else warnings).append(msg)
+
+    rsi = indicators.get("rsi")
+    try:
+        rsi_val = float(rsi)
+        if rsi_val >= 70 and final_signal == "BUY":
+            _add(f"RSI={rsi_val} is overbought (>=70) but signal is BUY — possible contradiction.")
+        if rsi_val <= 30 and final_signal == "SELL":
+            _add(f"RSI={rsi_val} is oversold (<=30) but signal is SELL — possible contradiction.")
+    except (TypeError, ValueError):
+        pass
+
+    overall_sent = str(news_metrics.get("overall_sentiment", "")).lower()
+    if "negative" in overall_sent and final_signal == "BUY":
+        _add("News sentiment is negative but signal is BUY — worth verifying.")
+    if "positive" in overall_sent and final_signal == "SELL":
+        _add("News sentiment is positive but signal is SELL — worth verifying.")
+
+    if fund_agrees_with_final and info_notes:
+        info_notes.append(
+            "The technical/sentiment contradiction(s) above were NOT flagged because the "
+            f"Fundamentals Analyst's own hard verdict ({fund_verdict}) already agrees with "
+            "the final signal — i.e. strong fundamentals legitimately override soft "
+            "sentiment/technical signals."
+        )
+
+    if fund_verdict:
+        if "SELL" in fund_verdict_upper and final_signal == "BUY":
+            warnings.append(
+                f"Fundamentals Analyst said SELL ({fund_verdict}) but the final signal is BUY — "
+                "the debate/trader/PM chain overrode that verdict; needs direct review."
+            )
+        elif "BUY" in fund_verdict_upper and final_signal == "SELL":
+            warnings.append(
+                f"Fundamentals Analyst said BUY ({fund_verdict}) but the final signal is SELL — "
+                "the debate/trader/PM chain overrode that verdict; needs direct review."
+            )
+        elif "HOLD" in fund_verdict_upper and final_signal in ("BUY", "SELL"):
+            warnings.append(
+                f"Fundamentals Analyst said HOLD ({fund_verdict}) but the final signal is {final_signal} — "
+                "the debate/trader/PM chain moved off a neutral fundamentals verdict without a hard "
+                "SELL/BUY basis for doing so; needs direct review."
+            )
+
+    return warnings, info_notes
+
+
+def _extract_cited_number(text: str, label_patterns: list[str]) -> float | None:
+    """Finds the number written near a label (e.g. "RSI") in the decision
+    text. First match wins.
+
+    Tolerates natural-language connectors between the label and the number
+    (e.g. "RSI at 68.17", "RSI is currently 68.17", "RSI stands at 68.17"),
+    not just "RSI: 68.17" / "RSI = 68.17" — an LLM writing prose almost never
+    uses the strict label+colon form, so a stricter pattern here would make
+    this check silently never fire in practice. The <=20-char gap cap keeps
+    it from skipping past to an unrelated number further down the text.
+    """
+    for label in label_patterns:
+        m = re.search(rf"{label}\b(?:\s*\([^)]*\))?[^0-9\-]{{0,20}}(-?\d+\.?\d*)", text, re.IGNORECASE)
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                continue
+    return None
+
+
+def check_numeric_contradiction(final_decision_text: str, indicators: dict,
+                                fund_metrics: dict) -> list[str]:
+    """Compares every number the decision text cites against the raw
+    ground-truth value, with a generous rounding tolerance (2% relative or
+    0.5 absolute) so "same number, fewer decimals" is never confused with a
+    genuinely wrong figure. Pure Python — no LLM arithmetic judgment."""
+    checks = [
+        ("RSI", ["RSI"], indicators.get("rsi")),
+        ("MACD", ["MACD"], indicators.get("macd")),
+        ("P/E Ratio", ["P/E Ratio", "P/E"], fund_metrics.get("pe_ratio")),
+        ("EPS (TTM)", [r"EPS \(TTM\)", "EPS"], fund_metrics.get("eps_ttm")),
+    ]
+    mismatches = []
+    for label, patterns, raw in checks:
+        if raw in (None, "", "N/A"):
+            continue
+        try:
+            raw_val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        cited = _extract_cited_number(final_decision_text, patterns)
+        if cited is None:
+            continue
+        diff = abs(cited - raw_val)
+        tolerance = max(0.5, 0.02 * abs(raw_val))
+        if diff > tolerance:
+            mismatches.append(
+                f"{label}: decision text says {cited}, raw data says {raw_val} "
+                f"(diff={diff:.2f}, tolerance={tolerance:.2f}) — possible genuine mismatch."
+            )
+    return mismatches
+
+
+def llm_signal_consistency_check(final_decision_text: str, llm) -> str:
+    """The one genuinely subjective/semantic question — is the decision
+    text's own reasoning self-consistent? Result is advisory-only (see
+    run_decision_verifier); a 7B model's opinion here doesn't get to FLAG a
+    run on its own."""
+    prompt = f"""You are a fact-checking auditor reviewing a trading decision before it is finalized.
+
+=== FINAL DECISION TEXT ===
+{final_decision_text[:1200]}
+
+Check ONLY this one thing:
+
+Respond with ONE strict marker line FIRST (machine-parsed), THEN your explanation
+— do not paraphrase the marker:
+SIGNAL_CONSISTENT: YES or NO
+
+RULES (read carefully before answering):
+- HOLD is a legitimate, self-consistent conclusion whenever the inputs are mixed --
+  e.g. overbought/oversold technicals pulling one way while fundamentals or news
+  sentiment pull the other way. Mentioning a caution/risk factor and then still
+  making a call (BUY/HOLD/SELL) is NORMAL trading commentary, not an inconsistency.
+- Only answer NO if the decision text's OWN stated reasoning DIRECTLY and STRONGLY
+  contradicts its OWN action -- e.g. the text says "this is a clear sell signal" or
+  "there is no reason to buy" but then names BUY as the action. A hedge like
+  "shows some overbought risk but still has growth potential" followed by BUY is
+  CONSISTENT, not a contradiction -- do not flag it.
+- Default to YES unless the contradiction is obvious and severe.
+
+Then, in 1-2 short bullet points, if SIGNAL_CONSISTENT is NO, quote the specific
+phrase in the decision text whose own reasoning contradicts its own action.
+
+Be concise and only flag REAL, severe discrepancies -- do not invent problems.
+"""
+    try:
+        return invoke_llm_with_retry(llm, prompt).content.strip()
+    except Exception as e:  # noqa: BLE001
+        return f"(LLM fact-check failed: {e})"
+
+
+def run_decision_verifier(final_decision_text: str, indicators: dict, fund_metrics: dict,
+                          news_metrics: dict, fundamentals_report: str, llm,
+                          log=print) -> dict:
+    """Runs all three checks and returns VERIFIED/FLAGGED status. If the
+    Fundamentals Analyst's own hard verdict directly contradicts the final
+    signal, the effective/actionable signal is auto-downgraded to HOLD —
+    better to sit out than trade on an unresolved internal contradiction."""
+    sig_match = re.search(r"\*{0,2}(BUY|HOLD|SELL)\*{0,2}", final_decision_text, re.IGNORECASE)
+    final_signal = sig_match.group(1).upper() if sig_match else "N/A"
+
+    log("running rule-based checks")
+    rule_warnings, rule_info_notes = rule_based_checks(
+        final_signal, indicators, news_metrics, fundamentals_report=fundamentals_report)
+
+    log("running deterministic numeric-contradiction check")
+    numeric_mismatches = check_numeric_contradiction(final_decision_text, indicators, fund_metrics)
+
+    log("running advisory LLM semantic check")
+    llm_notes = llm_signal_consistency_check(final_decision_text, llm)
+
+    llm_call_failed = "(llm fact-check failed" in llm_notes.lower()
+    signal_consistent_m = re.search(r"SIGNAL_CONSISTENT:\s*(YES|NO)", llm_notes, re.IGNORECASE)
+    markers_missing = signal_consistent_m is None
+
+    # Status is decided only by hard/reliable signals: rule-based
+    # contradiction, code-verified numeric mismatch, or the LLM call
+    # failing/not following the format. The LLM's own SIGNAL_CONSISTENT
+    # opinion is advisory and never flips status by itself.
+    status = "FLAGGED" if (rule_warnings or numeric_mismatches or llm_call_failed or markers_missing) else "VERIFIED"
+
+    notes_parts = []
+    if rule_warnings:
+        notes_parts.append("Rule-based: " + " | ".join(rule_warnings))
+    if rule_info_notes:
+        notes_parts.append("Rule-based (info, non-flagging): " + " | ".join(rule_info_notes))
+    if numeric_mismatches:
+        notes_parts.append("Numeric check (code, non-LLM): " + " | ".join(numeric_mismatches))
+    notes_parts.append("LLM semantic check (advisory, does NOT affect status): " + llm_notes)
+    notes = "\n".join(notes_parts)
+
+    fundamentals_contradiction = any("Fundamentals Analyst said" in w for w in rule_warnings)
+    effective_signal = final_signal
+    auto_overridden = fundamentals_contradiction and final_signal != "HOLD"
+    if auto_overridden:
+        effective_signal = "HOLD"
+        notes += (
+            f"\n\nAUTO-OVERRIDE: direct contradiction with the Fundamentals Analyst's verdict — "
+            f"raw signal was {final_signal}, effective/actionable signal forced to HOLD. "
+            f"Safer not to trade without resolving the contradiction."
+        )
+
+    log(f"verification status: {status}" + (" (auto-overridden to HOLD)" if auto_overridden else ""))
+    return {
+        "status": status, "notes": notes, "final_signal": final_signal,
+        "effective_signal": effective_signal, "auto_overridden": auto_overridden,
+    }
+
+
+def create_decision_verifier(llm, log=print):
+    def node(state):
+        final_text = state.get("final_trade_decision", "")
+        indicators = state.get("indicators_parsed", {})
+        fund_metrics = state.get("fund_metrics", {})
+        news_metrics = state.get("news_metrics", {})
+        fundamentals_report = state.get("fundamentals_report", "")
+        result = run_decision_verifier(
+            final_text, indicators, fund_metrics, news_metrics, fundamentals_report,
+            llm, log=log)
+        return {"verification_result": result}
+
+    return node
