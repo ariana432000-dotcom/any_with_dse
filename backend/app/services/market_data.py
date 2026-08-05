@@ -103,11 +103,18 @@ async def get_quote(ticker: str) -> dict:
     }
 
 
-async def get_news(ticker: str, limit: int = 8) -> list[dict]:
+async def get_news(ticker: str, limit: int = 8, refresh: bool = False) -> list[dict]:
+    """🔴 FIXED: app/api/routes/stocks.py's news route already calls this
+    as get_news(ticker, limit, refresh=refresh) -- without `refresh`
+    accepted here, every /news request raised TypeError: get_news() got
+    an unexpected keyword argument 'refresh', a 500 on every single call.
+    `refresh=True` skips the cache read (still writes a fresh entry after),
+    for testing/debugging without waiting out the 10-minute TTL below."""
     key = f"news:{ticker.upper()}:{limit}"
-    cached = await _cache_get(key)
-    if cached:
-        return cached
+    if not refresh:
+        cached = await _cache_get(key)
+        if cached:
+            return cached
     items = await asyncio.to_thread(md.fetch_recent_news, ticker, limit)
     await _cache_set(key, items, ttl=600)
     return items
