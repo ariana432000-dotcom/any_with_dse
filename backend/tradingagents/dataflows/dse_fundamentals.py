@@ -91,18 +91,34 @@ def _throttled_get(url, params=None):
 
 def _parse_label_value_tables(soup: BeautifulSoup) -> dict:
     """
-    DSE renders most snapshot data as <td>Label</td><td>Value</td> pairs
-    inside plain HTML tables. Walking every row and building a
-    {label: value} dict is more robust than hardcoding class names, since
-    dsebd.org's markup shifts without notice -- but it also means you
-    should sanity-check the output against the live page after DSE does
-    a site redesign.
+    🔴 FIXED (confirmed live via the Fundamentals Check debug view):
+    dsebd.org's page mixes two different row layouts. Some rows are clean
+    "<td>Label</td><td>Value</td>" pairs (handled by the original logic
+    below). Others -- confirmed live, e.g. a row whose two cells were
+    literally "Trading Code:BEXIMCO" and "Scrip Code:99613" -- pack a
+    compact "Label:Value" INSIDE each cell of a 2-column grid, so treating
+    cell[0] as the label and cell[1] as the value for the whole row
+    produced garbage entries like {"Trading Code:BEXIMCO": "Scrip
+    Code:99613"}. This is exactly the section that holds P/E, EPS, and
+    Market Capitalization, so those never made it into `fields` under any
+    recognizable label. Now: a 2-cell row where NEITHER cell contains a
+    colon is still treated as the classic label|value pair; otherwise,
+    every cell is checked independently for its own "Label:Value" content
+    and split on the first colon.
     """
     data = {}
     for row in soup.find_all("tr"):
-        cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-        if len(cells) == 2 and cells[0]:
+        cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
+        cells = [c for c in cells if c]
+        if len(cells) == 2 and ":" not in cells[0] and ":" not in cells[1]:
             data[cells[0].rstrip(":").strip()] = cells[1]
+        else:
+            for cell in cells:
+                if ":" in cell:
+                    label, _, value = cell.partition(":")
+                    label, value = label.strip(), value.strip()
+                    if label and value:
+                        data[label] = value
     return data
 
 
@@ -142,8 +158,10 @@ def get_fundamentals(ticker: str, curr_date: str = None) -> str:
 
     wanted_keywords = [
         "last trading price", "closing price", "face value", "market category",
-        "sector", "pe(x)", "eps", "nav per share", "market capitalization",
+        "sector", "pe(x)", "p/e", "price earning", "eps", "nav per share",
+        "nav(per share)", "market capitalization", "market cap",
         "dividend", "sponsor", "govt", "institute", "foreign", "public",
+        "trading code", "scrip code",
     ]
     lines = [f"DSE fundamentals snapshot -- {ticker} (as of {curr_date or datetime.now().date()})"]
     for key, value in fields.items():
