@@ -35,47 +35,58 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.dsebd.org/displayCompany.php"
 ALT_BASE_URL = "https://dse.com.bd/displayCompany.php"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; personal-research-bot/1.0)"
-}
+# ✅ CHANGED: no longer overriding a User-Agent here -- _throttled_get now
+# goes through bdshare's own safe_get(), which uses bdshare's own session
+# headers (already proven working across this site's other endpoints).
 DSE_REQUEST_DELAY_SECONDS = 2.0  # be polite -- there's no public API
 
 _last_request_ts = 0.0
 
 
 def _throttled_get(url, params=None):
-    """✅ FIXED: previously used a fresh `requests.get()`, which hits
-    dsebd.org's incomplete certificate chain with the *default* certifi
-    bundle -- the same SSL failure confirmed (live, on both a local machine
-    and Railway) and fixed for the company-name listing fetch in
-    app/pipeline/market_data.py. That fix works because bdshare bundles the
-    missing Sectigo DV R36 intermediate into its own shared requests.Session
-    (bdshare.util.helper._session) -- not because of a different host. This
-    reuses that same patched session (still passing our own honest
-    User-Agent per-request) instead of re-implementing SSL trust from
-    scratch, and adds the dse.com.bd fallback as a genuine outage backstop
-    (separate from the cert fix)."""
-    from bdshare.util.helper import _session as _bdshare_session
+    """🔴 FIXED (still 403ing after the User-Agent fix -- confirmed live):
+    dropping our own UA override wasn't enough by itself. bdshare ships
+    its own get_company_info(), which hits this EXACT same
+    displayCompany.php endpoint successfully, via its safe_get() helper --
+    which retries up to 3 times with exponential back-off AND tries both
+    the primary and alt host on every single attempt (up to 6 tries total
+    by default), instead of the one-shot, no-retry fetch this function
+    was doing. If dsebd.org's 403 here is a transient rate-limit/WAF
+    flake rather than a hard, permanent IP-level block, that retry
+    resilience is very plausibly the actual difference between "works"
+    (bdshare's OHLCV/news calls, and bdshare's own get_company_info) and
+    "doesn't" (this function, one attempt, no retry). Reusing bdshare's
+    own proven safe_get() directly -- rather than reimplementing a
+    thinner version of the same retry/fallback logic ourselves -- is the
+    more robust fix. This only changes HOW the HTML is fetched; our own
+    downstream parsing (_parse_label_value_tables) is unchanged, since we
+    need label:value pairs, not bdshare's pd.read_html() table shape.
+    If this STILL 403s after retries, that's strong evidence the block is
+    IP-based (e.g. Railway's datacenter range flagged) rather than
+    request-shape-based -- test the same code from a non-datacenter
+    connection to confirm."""
+    from bdshare.util.helper import BDShareError, safe_get
 
     global _last_request_ts
     elapsed = time.time() - _last_request_ts
     if elapsed < DSE_REQUEST_DELAY_SECONDS:
         time.sleep(DSE_REQUEST_DELAY_SECONDS - elapsed)
 
-    last_exc = None
-    for target in (url, ALT_BASE_URL if url == BASE_URL else None):
-        if not target:
-            continue
-        try:
-            resp = _bdshare_session.get(target, params=params, headers=HEADERS, timeout=15)
-            resp.raise_for_status()
-            _last_request_ts = time.time()
-            return resp
-        except requests.RequestException as e:
-            last_exc = e
-            continue
-    _last_request_ts = time.time()
-    raise last_exc
+    try:
+        resp = safe_get(
+            url, params=params,
+            alt_url=ALT_BASE_URL if url == BASE_URL else None,
+            retries=3, pause=1.0, timeout=15,
+        )
+        return resp
+    except BDShareError as e:
+        # Re-raise as requests.RequestException so get_fundamentals()'s
+        # existing `except requests.RequestException` still catches this
+        # without needing its own change -- BDShareError is a plain
+        # Exception subclass, not a RequestException one.
+        raise requests.RequestException(str(e)) from e
+    finally:
+        _last_request_ts = time.time()
 
 
 def _parse_label_value_tables(soup: BeautifulSoup) -> dict:
@@ -104,25 +115,13 @@ def get_fundamentals(ticker: str, curr_date: str = None) -> str:
     try:
         resp = _throttled_get(BASE_URL, params={"name": ticker})
     except requests.RequestException as e:
-        # ✅ CHANGED: log the HTTP status explicitly (e.g. "403 Client Error:
-        # Forbidden") rather than just the generic exception repr -- this is
-        # the same displayCompany.php endpoint pattern as company_listing.php,
-        # which we've already confirmed dsebd.org returns 403 for from this
-        # Railway deployment. If fundamentals are silently all N/A, this line
-        # is how to confirm it's the same site-wide block rather than a
-        # parsing bug.
-        status = getattr(getattr(e, "response", None), "status_code", "no-response")
-        logger.warning("DSE fundamentals fetch failed for %s: HTTP %s — %s", ticker, status, e)
-        return f"DSE fundamentals unavailable for {ticker}: HTTP {status} — {e}"
+        logger.warning("DSE fundamentals fetch failed for %s: %s", ticker, e)
+        return f"DSE fundamentals unavailable for {ticker}: {e}"
 
     soup = BeautifulSoup(resp.text, "html.parser")
     fields = _parse_label_value_tables(soup)
-    logger.info("DSE fundamentals[%s] fetched: HTTP %s, %d bytes, %d label-value fields parsed",
-                ticker, resp.status_code, len(resp.text), len(fields))
 
     if not fields:
-        logger.warning("DSE fundamentals[%s]: page loaded (HTTP %s) but no label-value table "
-                        "found -- markup likely changed, not a fetch/block issue", ticker, resp.status_code)
         return (
             f"No fundamentals table found for {ticker} on DSE. The page "
             f"markup may have changed -- inspect {BASE_URL}?name={ticker} "
@@ -145,6 +144,63 @@ def get_fundamentals(ticker: str, curr_date: str = None) -> str:
     return "\n".join(lines)
 
 
+def quick_check(ticker: str, curr_date: str = None) -> dict:
+    """Standalone sanity-check for the UI's "Fundamentals Check" page/route
+    (see app/api/routes/stocks.py's /fundamentals/check and
+    app/services/market_data.py's get_fundamentals_check). Calls
+    get_fundamentals() directly -- one HTTP fetch, no LLM call, no other
+    analysts, no LangGraph pipeline -- so you can verify a scrape/parsing
+    fix in a couple seconds instead of waiting through a full multi-agent
+    AI Analysis run.
+
+    Mirrors the keyword-matching g_dse() logic in
+    app/pipeline/agents.py's create_fundamentals_analyst. Kept as a small,
+    independent copy rather than a shared import: this needs to keep
+    working even if that function's internals change shape, and the two
+    call sites have different failure-handling needs (this one returns a
+    structured status for a UI card; that one silently falls back to
+    "N/A" per-field for an LLM prompt).
+    """
+    raw = get_fundamentals(ticker, curr_date)
+
+    def _find(keywords, exclude=()):
+        for line in raw.split("\n"):
+            low = line.lower()
+            if any(k in low for k in keywords) and not any(e in low for e in exclude):
+                import re
+                m = re.search(r"(-?[\d,]+\.?\d*)", line.split(":", 1)[-1])
+                if m:
+                    return m.group(1).replace(",", "")
+        return None
+
+    parsed = {
+        "pe_ratio": _find(["pe(x)", "p/e"]),
+        "eps": _find(["eps"], exclude=("change",)),
+        "market_cap": _find(["market capitalization", "market cap"]),
+        "dividend_yield": _find(["dividend"]),
+    }
+
+    if raw.startswith("DSE fundamentals snapshot"):
+        ok, status = True, "OK -- live snapshot fetched from dsebd.org successfully."
+    elif raw.startswith("DSE fundamentals unavailable"):
+        ok, status = False, ("FAILED -- the request to dsebd.org/dse.com.bd itself errored "
+                              "(network, cert, or a block like 403). See raw_response below.")
+    elif raw.startswith("No fundamentals table found"):
+        ok, status = False, ("FAILED -- the page loaded but didn't parse into label:value rows "
+                              "(markup may have changed, or dsebd.org served something other "
+                              "than the real company page).")
+    else:
+        ok, status = False, "UNKNOWN -- unexpected response shape, see raw_response below."
+
+    return {
+        "ticker": ticker.upper(),
+        "ok": ok,
+        "status": status,
+        "parsed": parsed,
+        "raw_response": raw[:500],
+    }
+
+
 def get_balance_sheet(ticker: str, freq: str = "annual", curr_date: str = None):
     """Full balance sheet, extracted from the audited annual report PDF."""
     return _stmt.get_statement(ticker, "balance_sheet", freq=freq, curr_date=curr_date)
@@ -158,55 +214,6 @@ def get_cashflow(ticker: str, freq: str = "annual", curr_date: str = None):
 def get_income_statement(ticker: str, freq: str = "annual", curr_date: str = None):
     """Full income statement, extracted from the audited annual report PDF."""
     return _stmt.get_statement(ticker, "income_statement", freq=freq, curr_date=curr_date)
-
-
-def quick_check(ticker: str, curr_date: str = None) -> dict:
-    """✅ CHANGED: app/services/market_data.py's get_fundamentals_check()
-    (backing the "Fundamentals Check" UI page) already called this, but it
-    was never actually defined here -- every call raised AttributeError.
-
-    Single-fetch sanity check: reuses get_fundamentals() above (the exact
-    same fetch + keyword-filter path the real AI Analysis pipeline uses),
-    then re-parses its output for the 4 headline numbers so a green check
-    here means the full pipeline will see the same data -- no separate
-    parsing logic to drift out of sync with the real one.
-    """
-    raw = get_fundamentals(ticker, curr_date)
-
-    if raw.startswith("DSE fundamentals unavailable for"):
-        # get_fundamentals's own except-branch string -- the request itself
-        # failed (network/cert/blocked, see the HTTP status now included).
-        empty = {"pe_ratio": None, "eps": None, "market_cap": None, "dividend_yield": None}
-        return {"ticker": ticker, "ok": False, "status": raw, "parsed": empty, "raw_response": raw}
-
-    if raw.startswith("No fundamentals table found"):
-        # Page loaded but _parse_label_value_tables found no rows -- markup
-        # likely changed, different failure mode from a fetch/block issue.
-        empty = {"pe_ratio": None, "eps": None, "market_cap": None, "dividend_yield": None}
-        return {"ticker": ticker, "ok": False, "status": raw, "parsed": empty, "raw_response": raw}
-
-    def _extract(keywords, exclude=()):
-        for line in raw.split("\n"):
-            low = line.lower()
-            if any(k in low for k in keywords) and not any(e in low for e in exclude):
-                return line.split(":", 1)[-1].strip()
-        return None
-
-    parsed = {
-        "pe_ratio": _extract(["pe(x)", "p/e"]),
-        "eps": _extract(["eps"], exclude=("change",)),
-        "market_cap": _extract(["market capitalization", "market cap"]),
-        "dividend_yield": _extract(["dividend"]),
-    }
-    ok = any(v is not None for v in parsed.values())
-    status = (
-        "Fetched and parsed successfully"
-        if ok
-        else "Page fetched (HTTP 200) but none of PE/EPS/Market Cap/Dividend were "
-             "found in the parsed rows -- dsebd.org's label wording may have "
-             "changed. See raw_response below for what was actually parsed."
-    )
-    return {"ticker": ticker, "ok": ok, "status": status, "parsed": parsed, "raw_response": raw[:2000]}
 
 
 # ---------------------------------------------------------------------------
