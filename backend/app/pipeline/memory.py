@@ -235,7 +235,20 @@ class RAEMMemory:
             for idx, chunk in enumerate(_chunk_text(str(text))):
                 cid = hashlib.md5(f"{company}_{trade_date}_{source}_{idx}".encode()).hexdigest()[:16]
                 chunks.append(chunk)
-                metas.append({"company": company, "trade_date": trade_date, "source": source})
+                # ✅ CHANGED: same key-name mismatch as build_episode_document
+                # (see the comment there) -- "company"/"trade_date" meant the
+                # Memory API's MemoryRecord.from_chroma() found no "ticker"/
+                # "timestamp"/"memory_id" and every news_memory record showed
+                # blank in the Memory UI too. Added the compatible keys
+                # without removing the originals (nothing else reads these).
+                metas.append({
+                    "company": company, "trade_date": trade_date, "source": source,
+                    "memory_id": cid, "ticker": company, "timestamp": trade_date,
+                    "market_regime": "N/A", "agent_name": "raem_pipeline",
+                    "summary": chunk[:200], "decision": "N/A", "confidence": 0.0,
+                    "risk": "N/A", "version": "1.0", "outcome": "N/A",
+                    "experience_score": 0.0,
+                })
                 ids.append(cid)
         if chunks:
             self.news.upsert(ids=ids, documents=chunks, metadatas=metas)
@@ -351,6 +364,8 @@ Final Decision: {final_signal}
 Verifier Status: {verifier_status or 'N/A'}
 Decision Rationale Summary: {final_decision_text[:400]}"""
 
+    ep_id = make_episode_id(company, trade_date)
+
     metadata = {
         "company": company,
         "trade_date": trade_date,
@@ -367,6 +382,32 @@ Decision Rationale Summary: {final_decision_text[:400]}"""
         "exit_price": "N/A",
         "pnl_pct": "N/A",
         "outcome_label": "N/A",
+        # ✅ CHANGED: the Memory API (app/ai_engine/memory/schemas.py's
+        # MemoryRecord.from_chroma) reads a *different* set of metadata key
+        # names than RAEM's own code above uses (ticker vs company, decision
+        # vs final_signal, market_regime vs regime, timestamp vs trade_date,
+        # memory_id vs the id passed separately to .upsert()) -- so every
+        # episode saved here was landing in the same "episodic_memory"
+        # collection the Memory page reads, but with metadata the reader
+        # couldn't recognize at all. Result: the Memory UI/API showed
+        # ticker="", timestamp="", decision="", memory_id="" for every
+        # record, even though the underlying document/reasoning text was
+        # fully populated. These are ADDED (not replacing the keys above --
+        # gather_resolved_episodes/_build_where still filter on "company"/
+        # "regime"/"outcome_status") so both readers work off the same record.
+        "memory_id": ep_id,
+        "ticker": company,
+        "timestamp": trade_date,
+        "market_regime": regime,
+        "agent_name": "raem_pipeline",
+        "summary": final_decision_text[:200],
+        "decision": final_signal,
+        "confidence": 0.0,
+        "risk": "N/A",
+        "source": "raem_pipeline",
+        "version": "1.0",
+        "outcome": "PENDING",
+        "experience_score": 0.0,
     }
     return document_text.strip(), metadata
 
