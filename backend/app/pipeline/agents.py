@@ -230,7 +230,7 @@ def create_fundamentals_analyst(llm, log=print):
                 return "N/A"
 
             pe_val = g_dse(["pe(x)", "p/e"], fund)
-            eps_val = g_dse(["eps"], fund, exclude=("change",))
+            eps_val = g_dse(["eps"], fund, exclude=("change", "p/e", "ratio"))
             mcap_val = g_dse(["market capitalization", "market cap"], fund)
             div_val = g_dse(["dividend"], fund)
             # Not published on the DSE snapshot page at all -- left N/A
