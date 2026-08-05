@@ -341,7 +341,7 @@ export function PipelineFlowPanel({ pipeline }: { pipeline: PipelineStep[] | und
                 </>
               ) : (
                 <p className="mt-4 text-xs text-text-faint">
-                  This step hasn't run yet — its input/output will appear here once it does.
+                  This step has not run yet — its input/output will appear here once it does.
                 </p>
               )}
 
