@@ -44,17 +44,24 @@ _last_request_ts = 0.0
 
 
 def _throttled_get(url, params=None):
-    """✅ FIXED: previously used a fresh `requests.get()`, which hits
-    dsebd.org's incomplete certificate chain with the *default* certifi
-    bundle -- the same SSL failure confirmed (live, on both a local machine
-    and Railway) and fixed for the company-name listing fetch in
-    app/pipeline/market_data.py. That fix works because bdshare bundles the
-    missing Sectigo DV R36 intermediate into its own shared requests.Session
-    (bdshare.util.helper._session) -- not because of a different host. This
-    reuses that same patched session (still passing our own honest
-    User-Agent per-request) instead of re-implementing SSL trust from
-    scratch, and adds the dse.com.bd fallback as a genuine outage backstop
-    (separate from the cert fix)."""
+    """🔴 FIXED (still broken -- confirmed live, 403 Forbidden): the
+    previous fix reused bdshare's patched session for the SSL cert issue,
+    but still overrode its User-Agent with our own
+    "Mozilla/5.0 (compatible; personal-research-bot/1.0)" string via the
+    per-request `headers=` param. That override is real -- `requests`
+    merges per-request headers on top of session headers, so it replaced
+    bdshare's own "bdshare/2.0 (...)" UA for this call specifically.
+    OHLCV (day_end_archive.php) and news (old_news.php) go through this
+    same bdshare session WITHOUT that override and work fine, confirmed
+    live -- displayCompany.php (this function) is the one endpoint where
+    we were substituting a different UA, and it's the one endpoint
+    getting a 403. Dropping the override and using bdshare's own session
+    headers as-is (same UA + Accept + Accept-Encoding it already sends
+    successfully elsewhere on this site) is the minimal, most
+    evidence-backed fix. If dsebd.org's block is actually IP-based (e.g.
+    flagging Railway's datacenter range) rather than UA-based, this alone
+    won't fix it -- test the same code from a non-datacenter connection
+    (e.g. your own machine) to tell the two apart."""
     from bdshare.util.helper import _session as _bdshare_session
 
     global _last_request_ts
@@ -67,7 +74,7 @@ def _throttled_get(url, params=None):
         if not target:
             continue
         try:
-            resp = _bdshare_session.get(target, params=params, headers=HEADERS, timeout=15)
+            resp = _bdshare_session.get(target, params=params, timeout=15)
             resp.raise_for_status()
             _last_request_ts = time.time()
             return resp
