@@ -23,6 +23,7 @@ with DSE/BSEC directly rather than something to script around quietly.
 """
 
 import logging
+import re
 import time
 from datetime import datetime
 
@@ -106,28 +107,72 @@ def _parse_label_value_tables(soup: BeautifulSoup) -> dict:
     every cell is checked independently for its own "Label:Value" content
     and split on the first colon.
 
-    🔴 FIXED (confirmed live, ABBANK): chart-range <select> dropdowns
-    ("-Select Option-, 1 month, 3 months, ...") were leaking their full
-    option list into a cell's text, polluting fields with garbage like
-    "Closing Price Graph: -Select Option- 1 month 3 months...". These are
-    UI controls, never real data -- stripped before walking rows.
+    🔴 FIXED (confirmed live via a real dsebd.org screenshot, ISLAMIBANK):
+    P/E ratio and EPS live in WIDE time-series tables --
+    "Particulars | Jul 28, 2026 | Jul 29, 2026 | ... | Aug 04, 2026" --
+    not simple 2-cell rows, which is why they never appeared under any
+    label at all before (neither branch above matches a 7-cell row).
+    For rows with more than 2 cells: take the label from column 0, and
+    the RIGHTMOST cell that actually has a reported number as that row's
+    "current/latest" value -- skipping "-"/"n/a" placeholder columns for
+    periods with no data yet. Two consequences confirmed against the real
+    page: (1) a fully-dashed row (e.g. the "un-audited" P/E table, before
+    the audited figures exist) contributes nothing rather than a bogus
+    entry; (2) a pure-header wide row (e.g. "Earnings per share(EPS) |
+    EPS - Continuing Operations | NAV Per Share | ...", where every
+    "value" cell is text, not a number) also contributes nothing --
+    fixing the earlier "Earnings per share(EPS): EPS - Continuing
+    Operations" garbage as a side effect, since no cell there is numeric.
     """
     for tag in soup.find_all(["select", "script", "style"]):
         tag.decompose()
+
+    time_pattern = re.compile(r"^\d{1,2}:\d{2}")
+    no_value = {"-", "--", "n/a", "na", ""}
+
+    def _latest_numeric_cell(cells):
+        for cell in reversed(cells):
+            c = cell.strip()
+            if c.lower() in no_value:
+                continue
+            if any(ch.isdigit() for ch in c):
+                return c
+        return None
 
     data = {}
     for row in soup.find_all("tr"):
         cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
         cells = [c for c in cells if c]
+        if len(cells) < 2:
+            continue
         if len(cells) == 2 and ":" not in cells[0] and ":" not in cells[1]:
             data[cells[0].rstrip(":").strip()] = cells[1]
-        else:
+        elif len(cells) == 2:
             for cell in cells:
-                if ":" in cell:
+                # 🔴 FIXED (confirmed live, ISLAMIBANK): a plain time value
+                # like "2:40 PM" also "contains a colon", so the per-cell
+                # split above was misreading it as label="2", value="40 PM".
+                # Skip anything that starts like a clock time.
+                if ":" in cell and not time_pattern.match(cell):
                     label, _, value = cell.partition(":")
                     label, value = label.strip(), value.strip()
                     if label and value:
                         data[label] = value
+        else:
+            label = cells[0].rstrip(":").strip()
+            value = _latest_numeric_cell(cells[1:])
+            if not (label and value):
+                continue
+            data[label] = value
+            # EPS sub-rows are often labeled just "Basic"/"Diluted*"
+            # rather than repeating "EPS" -- alias them so the "eps"
+            # keyword match downstream (wanted_keywords / g_dse) can find
+            # them under a recognizable name.
+            low = label.lower()
+            if low.startswith("basic"):
+                data["EPS (Basic)"] = value
+            elif low.startswith("diluted"):
+                data["EPS (Diluted)"] = value
     return data
 
 
@@ -215,7 +260,7 @@ def quick_check(ticker: str, curr_date: str = None) -> dict:
 
     parsed = {
         "pe_ratio": _find(["pe(x)", "p/e"]),
-        "eps": _find(["eps"], exclude=("change",)),
+        "eps": _find(["eps"], exclude=("change", "p/e", "ratio")),
         "market_cap": _find(["market capitalization", "market cap"]),
         "dividend_yield": _find(["dividend"]),
     }
