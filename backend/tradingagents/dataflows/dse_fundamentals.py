@@ -106,27 +106,39 @@ def _parse_label_value_tables(soup: BeautifulSoup) -> dict:
     return data
 
 
+def _fetch_fields(ticker: str) -> tuple[dict | None, str | None]:
+    """Fetch + parse the DSE snapshot page into the full, UNFILTERED
+    {label: value} dict. Shared by get_fundamentals() (which applies the
+    wanted_keywords filter on top) and quick_check() (which needs the
+    complete dict, not just the filtered subset, to show what dsebd.org's
+    page actually contains when diagnosing a parsing gap). Returns
+    (fields, None) on success or (None, error_message) on failure."""
+    try:
+        resp = _throttled_get(BASE_URL, params={"name": ticker})
+    except requests.RequestException as e:
+        logger.warning("DSE fundamentals fetch failed for %s: %s", ticker, e)
+        return None, f"DSE fundamentals unavailable for {ticker}: {e}"
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    fields = _parse_label_value_tables(soup)
+    if not fields:
+        return None, (
+            f"No fundamentals table found for {ticker} on DSE. The page "
+            f"markup may have changed -- inspect {BASE_URL}?name={ticker} "
+            f"manually (view-source) and update _parse_label_value_tables."
+        )
+    return fields, None
+
+
 def get_fundamentals(ticker: str, curr_date: str = None) -> str:
     """
     Scrape the DSE company snapshot page for headline fundamentals: EPS,
     NAV per share, P/E, sponsor/director/govt/institute/foreign/public
     holding %, market cap, last dividend, etc.
     """
-    try:
-        resp = _throttled_get(BASE_URL, params={"name": ticker})
-    except requests.RequestException as e:
-        logger.warning("DSE fundamentals fetch failed for %s: %s", ticker, e)
-        return f"DSE fundamentals unavailable for {ticker}: {e}"
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    fields = _parse_label_value_tables(soup)
-
-    if not fields:
-        return (
-            f"No fundamentals table found for {ticker} on DSE. The page "
-            f"markup may have changed -- inspect {BASE_URL}?name={ticker} "
-            f"manually (view-source) and update _parse_label_value_tables."
-        )
+    fields, error = _fetch_fields(ticker)
+    if error:
+        return error
 
     wanted_keywords = [
         "last trading price", "closing price", "face value", "market category",
@@ -162,6 +174,7 @@ def quick_check(ticker: str, curr_date: str = None) -> dict:
     "N/A" per-field for an LLM prompt).
     """
     raw = get_fundamentals(ticker, curr_date)
+    all_fields, _fetch_error = _fetch_fields(ticker)
 
     def _find(keywords, exclude=()):
         for line in raw.split("\n"):
@@ -197,6 +210,14 @@ def quick_check(ticker: str, curr_date: str = None) -> dict:
         "ok": ok,
         "status": status,
         "parsed": parsed,
+        # ✅ CHANGED: previously only the wanted_keywords-filtered text was
+        # exposed, which is exactly the subset that WASN'T matching for
+        # P/E ratio and Market Cap -- there was no way to see what
+        # dsebd.org actually calls those fields without live access to
+        # the page. This is the COMPLETE unfiltered {label: value} dict
+        # (every <tr> on the page, not just the keyword-matched ones), so
+        # the real label wording is visible directly in the UI.
+        "all_fields": all_fields or {},
         "raw_response": raw[:500],
     }
 
