@@ -209,7 +209,7 @@ export function PipelineFlowPanel({ pipeline }: { pipeline: PipelineStep[] | und
               Agent pipeline flow
             </span>
           }
-          subtitle="বিশ্লেষণ শেষ হলে এখানে প্রতিটা এজেন্টের ইনপুট/আউটপুট দেখা যাবে।"
+          subtitle="Once the analysis is complete, you'll see each agent's input/output here."
         />
         <p className="text-xs text-text-faint">Waiting for pipeline steps to be recorded…</p>
       </Card>
@@ -297,7 +297,7 @@ export function PipelineFlowPanel({ pipeline }: { pipeline: PipelineStep[] | und
         {/* -------- right side: selected agent detail -------- */}
         <div className="w-full shrink-0 border-t border-border-soft p-5 lg:w-[360px] lg:border-l lg:border-t-0">
           {!selectedMeta ? (
-            <p className="text-xs text-text-faint">একটা agent-এ ক্লিক করো।</p>
+            <p className="text-xs text-text-faint">Click an agent to see details.</p>
           ) : (
             <div>
               <p className="mb-1 text-[10px] uppercase tracking-wide text-text-faint">
@@ -341,13 +341,13 @@ export function PipelineFlowPanel({ pipeline }: { pipeline: PipelineStep[] | und
                 </>
               ) : (
                 <p className="mt-4 text-xs text-text-faint">
-                  এই ধাপটা এখনো চলেনি — চলার পর এখানে input/output দেখা যাবে।
+                  This step hasn't run yet — its input/output will appear here once it does.
                 </p>
               )}
 
               {incoming.length ? (
                 <>
-                  <p className="mb-1.5 mt-4 text-[10px] uppercase tracking-wide text-text-faint">যেখান থেকে ডেটা আসে</p>
+                  <p className="mb-1.5 mt-4 text-[10px] uppercase tracking-wide text-text-faint">Data comes from</p>
                   <div className="flex flex-wrap gap-1.5">
                     {incoming.map((id) => (
                       <button
@@ -367,7 +367,7 @@ export function PipelineFlowPanel({ pipeline }: { pipeline: PipelineStep[] | und
 
               {outgoing.length ? (
                 <>
-                  <p className="mb-1.5 mt-3 text-[10px] uppercase tracking-wide text-text-faint">ডেটা যেখানে যায়</p>
+                  <p className="mb-1.5 mt-3 text-[10px] uppercase tracking-wide text-text-faint">Data goes to</p>
                   <div className="flex flex-wrap gap-1.5">
                     {outgoing.map((id) => (
                       <button
