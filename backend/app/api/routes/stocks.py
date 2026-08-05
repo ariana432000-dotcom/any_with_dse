@@ -34,3 +34,13 @@ async def news_debug(ticker: str, limit: int = Query(8, ge=1, le=30)) -> dict:
     import asyncio
 
     return await asyncio.to_thread(mds.get_news_debug, ticker, limit)
+
+
+@router.get("/{ticker}/fundamentals/check")
+async def fundamentals_check(ticker: str) -> dict:
+    """✅ CHANGED: this route was missing entirely -- the frontend's
+    "Fundamentals Check" page (stocksApi.fundamentalsCheck in
+    frontend/src/lib/api.ts) already called GET /stocks/{ticker}/
+    fundamentals/check, which 404'd since app.services.market_data's
+    get_fundamentals_check() existed but was never wired to a route."""
+    return await mds.get_fundamentals_check(ticker)
