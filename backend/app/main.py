@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
     else:
         log.info("AI provider: %s (%s) — %s", info["provider"], info["model"], info["detail"])
 
-   # Warm the sharenews24 article cache a little after startup, rather
+    # Warm the sharenews24 article cache a little after startup, rather
     # than immediately during it, so this doesn't add concurrent memory
     # pressure at the exact moment Mongo/Chroma above are also initialising
     # — a full revert of an earlier version of this (which fired
