@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   BarChart3,
   Brain,
+  ClipboardCheck,
   Database,
   LayoutDashboard,
   LineChart,
@@ -31,6 +32,7 @@ const ICONS: Record<NavItem["icon"], LucideIcon> = {
   dataset: Database,
   backtest: BarChart3,
   "paper-trading": Wallet,
+  "fundamentals-check": ClipboardCheck,
   settings: Settings,
 };
 
