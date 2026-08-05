@@ -498,6 +498,19 @@ export interface NewsResponse {
   items: NewsItem[];
 }
 
+export interface FundamentalsCheckResponse {
+  ticker: string;
+  ok: boolean | null;
+  status: string;
+  parsed: {
+    pe_ratio: string | null;
+    eps: string | null;
+    market_cap: string | null;
+    dividend_yield: string | null;
+  };
+  raw_response: string;
+}
+
 // ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
