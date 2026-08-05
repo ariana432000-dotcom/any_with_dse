@@ -233,13 +233,34 @@ def create_fundamentals_analyst(llm, log=print):
             eps_val = g_dse(["eps"], fund, exclude=("change", "p/e", "ratio"))
             mcap_val = g_dse(["market capitalization", "market cap"], fund)
             div_val = g_dse(["dividend"], fund)
+            # ✅ CHANGED: dsebd.org's page doesn't publish a computed
+            # dividend *yield* (dividend / current price) -- the "dividend"
+            # line this matches is the last-declared cash dividend
+            # percentage of FACE VALUE (e.g. "10%" on a 10-taka face value
+            # share), a fundamentally different, usually much larger number
+            # than a true yield. Labeling it "Dividend Yield" in the report
+            # asserts a calculation that was never actually done.
+            div_label = "Last Declared Dividend (% of face value, not a computed yield)"
             # Not published on the DSE snapshot page at all -- left N/A
             # rather than guessed, per the "never invent data" rule below.
             rev_val = "N/A"
             beta_val = "N/A"
             hi52_val = "N/A"
             lo52_val = "N/A"
-            sma50_val = "N/A"
+            # ✅ CHANGED: 50-Day SMA WAS being hardcoded N/A here even though
+            # it's not actually a dsebd.org-snapshot-only field -- it's a
+            # price-derived technical indicator, and get_indicators (the
+            # same tool the Market Analyst already calls, computed from
+            # bdshare OHLCV history) can provide it directly rather than
+            # requiring dsebd.org to publish it.
+            try:
+                sma_raw = str(U["get_indicators"].invoke({
+                    "symbol": company, "indicator": "close_50_sma", "curr_date": current_date,
+                }))
+                m_sma = re.search(r"(-?[\d,]+\.?\d*)", sma_raw)
+                sma50_val = m_sma.group(1).replace(",", "") if m_sma else "N/A"
+            except Exception:  # noqa: BLE001
+                sma50_val = "N/A"
 
             # dse_statement_extractor.py returns an Alpha-Vantage-*shaped*
             # dict but with its own camelCase keys (see STATEMENT_SCHEMAS) --
@@ -284,6 +305,7 @@ def create_fundamentals_analyst(llm, log=print):
             rev_val = fmt(rev_ttm.group(1)) if rev_ttm else "N/A"
             beta_val = g(r"Beta.*?:\s*([\d.]+)", fund)
             div_val = g(r"Dividend Yield.*?:\s*([\d.]+)", fund)
+            div_label = "Dividend Yield"
             hi52_val = g(r"52 Week High.*?:\s*([\d.]+)", fund)
             lo52_val = g(r"52 Week Low.*?:\s*([\d.]+)", fund)
             sma50_val = g(r"50 Day Average.*?:\s*([\d.]+)", fund)
@@ -311,7 +333,7 @@ MARKET DATA (TTM):
 - EPS (TTM): {eps_val}
 - Revenue (TTM): {rev_val}
 - Beta: {beta_val}
-- Dividend Yield: {div_val}%
+- {div_label}: {div_val}%
 - 52-Week Range: {lo52_val} - {hi52_val}
 - 50-Day SMA: {sma50_val}
 
