@@ -44,24 +44,17 @@ _last_request_ts = 0.0
 
 
 def _throttled_get(url, params=None):
-    """🔴 FIXED (still broken -- confirmed live, 403 Forbidden): the
-    previous fix reused bdshare's patched session for the SSL cert issue,
-    but still overrode its User-Agent with our own
-    "Mozilla/5.0 (compatible; personal-research-bot/1.0)" string via the
-    per-request `headers=` param. That override is real -- `requests`
-    merges per-request headers on top of session headers, so it replaced
-    bdshare's own "bdshare/2.0 (...)" UA for this call specifically.
-    OHLCV (day_end_archive.php) and news (old_news.php) go through this
-    same bdshare session WITHOUT that override and work fine, confirmed
-    live -- displayCompany.php (this function) is the one endpoint where
-    we were substituting a different UA, and it's the one endpoint
-    getting a 403. Dropping the override and using bdshare's own session
-    headers as-is (same UA + Accept + Accept-Encoding it already sends
-    successfully elsewhere on this site) is the minimal, most
-    evidence-backed fix. If dsebd.org's block is actually IP-based (e.g.
-    flagging Railway's datacenter range) rather than UA-based, this alone
-    won't fix it -- test the same code from a non-datacenter connection
-    (e.g. your own machine) to tell the two apart."""
+    """✅ FIXED: previously used a fresh `requests.get()`, which hits
+    dsebd.org's incomplete certificate chain with the *default* certifi
+    bundle -- the same SSL failure confirmed (live, on both a local machine
+    and Railway) and fixed for the company-name listing fetch in
+    app/pipeline/market_data.py. That fix works because bdshare bundles the
+    missing Sectigo DV R36 intermediate into its own shared requests.Session
+    (bdshare.util.helper._session) -- not because of a different host. This
+    reuses that same patched session (still passing our own honest
+    User-Agent per-request) instead of re-implementing SSL trust from
+    scratch, and adds the dse.com.bd fallback as a genuine outage backstop
+    (separate from the cert fix)."""
     from bdshare.util.helper import _session as _bdshare_session
 
     global _last_request_ts
@@ -74,7 +67,7 @@ def _throttled_get(url, params=None):
         if not target:
             continue
         try:
-            resp = _bdshare_session.get(target, params=params, timeout=15)
+            resp = _bdshare_session.get(target, params=params, headers=HEADERS, timeout=15)
             resp.raise_for_status()
             _last_request_ts = time.time()
             return resp
@@ -111,13 +104,25 @@ def get_fundamentals(ticker: str, curr_date: str = None) -> str:
     try:
         resp = _throttled_get(BASE_URL, params={"name": ticker})
     except requests.RequestException as e:
-        logger.warning("DSE fundamentals fetch failed for %s: %s", ticker, e)
-        return f"DSE fundamentals unavailable for {ticker}: {e}"
+        # ✅ CHANGED: log the HTTP status explicitly (e.g. "403 Client Error:
+        # Forbidden") rather than just the generic exception repr -- this is
+        # the same displayCompany.php endpoint pattern as company_listing.php,
+        # which we've already confirmed dsebd.org returns 403 for from this
+        # Railway deployment. If fundamentals are silently all N/A, this line
+        # is how to confirm it's the same site-wide block rather than a
+        # parsing bug.
+        status = getattr(getattr(e, "response", None), "status_code", "no-response")
+        logger.warning("DSE fundamentals fetch failed for %s: HTTP %s — %s", ticker, status, e)
+        return f"DSE fundamentals unavailable for {ticker}: HTTP {status} — {e}"
 
     soup = BeautifulSoup(resp.text, "html.parser")
     fields = _parse_label_value_tables(soup)
+    logger.info("DSE fundamentals[%s] fetched: HTTP %s, %d bytes, %d label-value fields parsed",
+                ticker, resp.status_code, len(resp.text), len(fields))
 
     if not fields:
+        logger.warning("DSE fundamentals[%s]: page loaded (HTTP %s) but no label-value table "
+                        "found -- markup likely changed, not a fetch/block issue", ticker, resp.status_code)
         return (
             f"No fundamentals table found for {ticker} on DSE. The page "
             f"markup may have changed -- inspect {BASE_URL}?name={ticker} "
@@ -138,63 +143,6 @@ def get_fundamentals(ticker: str, curr_date: str = None) -> str:
         # silently return an empty-looking report
         lines += [f"{k}: {v}" for k, v in fields.items()]
     return "\n".join(lines)
-
-
-def quick_check(ticker: str, curr_date: str = None) -> dict:
-    """Standalone sanity-check for the UI's "Fundamentals Check" page/route
-    (see app/api/routes/stocks.py's /fundamentals/check and
-    app/services/market_data.py's get_fundamentals_check). Calls
-    get_fundamentals() directly -- one HTTP fetch, no LLM call, no other
-    analysts, no LangGraph pipeline -- so you can verify a scrape/parsing
-    fix in a couple seconds instead of waiting through a full multi-agent
-    AI Analysis run.
-
-    Mirrors the keyword-matching g_dse() logic in
-    app/pipeline/agents.py's create_fundamentals_analyst. Kept as a small,
-    independent copy rather than a shared import: this needs to keep
-    working even if that function's internals change shape, and the two
-    call sites have different failure-handling needs (this one returns a
-    structured status for a UI card; that one silently falls back to
-    "N/A" per-field for an LLM prompt).
-    """
-    raw = get_fundamentals(ticker, curr_date)
-
-    def _find(keywords, exclude=()):
-        for line in raw.split("\n"):
-            low = line.lower()
-            if any(k in low for k in keywords) and not any(e in low for e in exclude):
-                import re
-                m = re.search(r"(-?[\d,]+\.?\d*)", line.split(":", 1)[-1])
-                if m:
-                    return m.group(1).replace(",", "")
-        return None
-
-    parsed = {
-        "pe_ratio": _find(["pe(x)", "p/e"]),
-        "eps": _find(["eps"], exclude=("change",)),
-        "market_cap": _find(["market capitalization", "market cap"]),
-        "dividend_yield": _find(["dividend"]),
-    }
-
-    if raw.startswith("DSE fundamentals snapshot"):
-        ok, status = True, "OK -- live snapshot fetched from dsebd.org successfully."
-    elif raw.startswith("DSE fundamentals unavailable"):
-        ok, status = False, ("FAILED -- the request to dsebd.org/dse.com.bd itself errored "
-                              "(network, cert, or a block like 403). See raw_response below.")
-    elif raw.startswith("No fundamentals table found"):
-        ok, status = False, ("FAILED -- the page loaded but didn't parse into label:value rows "
-                              "(markup may have changed, or dsebd.org served something other "
-                              "than the real company page).")
-    else:
-        ok, status = False, "UNKNOWN -- unexpected response shape, see raw_response below."
-
-    return {
-        "ticker": ticker.upper(),
-        "ok": ok,
-        "status": status,
-        "parsed": parsed,
-        "raw_response": raw[:500],
-    }
 
 
 def get_balance_sheet(ticker: str, freq: str = "annual", curr_date: str = None):
