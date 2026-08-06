@@ -414,6 +414,16 @@ class Orchestrator:
                 take_profit=_extract_price(text, r"take[- ]?profit"),
                 summary=text[:800],
             )
+        elif stage == "investment_facilitator":
+            # 🔴 FIXED: DebateState.winner/summary were never assigned
+            # anywhere -- always empty defaults -- even though the
+            # Investment Facilitator's whole job is to declare a winner
+            # and summarize the debate. Its output just silently never
+            # made it past the raw pipeline-step log.
+            if state.debate is None:
+                state.debate = DebateState()
+            state.debate.winner = _extract(text, r"(BULL WINS|BEAR WINS|DRAW)", "")
+            state.debate.summary = text[:2000]
         elif stage == "portfolio_manager":
             sig = _signal(text)
             if state.portfolio is None:
