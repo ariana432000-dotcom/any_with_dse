@@ -410,6 +410,8 @@ class Orchestrator:
             state.risk = RiskState(
                 rating=_extract(text, r"(LOW|MEDIUM|HIGH)\s*(?:risk)?", "MEDIUM"),
                 position_sizing=_extract(text, r"(\d{1,3}\s*%)", ""),
+                stop_loss=_extract_price(text, r"stop[- ]?loss"),
+                take_profit=_extract_price(text, r"take[- ]?profit"),
                 summary=text[:800],
             )
         elif stage == "portfolio_manager":
@@ -552,6 +554,29 @@ def _strip_html(html: str) -> str:
 def _extract(text: str, pattern: str, default: str = "") -> str:
     m = re.search(pattern, text or "", re.IGNORECASE)
     return m.group(1).upper() if m else default
+
+
+def _extract_price(text: str, label_pattern: str) -> float | None:
+    """🔴 FIXED: RiskState's stop_loss/take_profit were never populated at
+    all -- _absorb_stage only ever set rating/position_sizing/summary from
+    the risk facilitator's text, so these fields stayed None forever
+    (shown as "—" in the Recommendation panel) even though the risk
+    facilitator's own prompt explicitly asks it to "Set stop-loss and
+    take-profit levels". This finds a price-like number near a label
+    ("stop-loss", "take-profit") in that free-form text, tolerating
+    connectors ("at", "around", "of"), a $/Tk currency prefix, and commas
+    in the number -- same style as _extract_cited_number in agents.py's
+    decision verifier."""
+    m = re.search(
+        rf"{label_pattern}\b[^0-9\-]{{0,25}}[\$৳]?\s*(?:Tk\.?\s*)?(-?[\d,]+\.?\d*)",
+        text or "", re.IGNORECASE,
+    )
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
 
 
 def _side_case(state: ExecutionState, side: str) -> str:
