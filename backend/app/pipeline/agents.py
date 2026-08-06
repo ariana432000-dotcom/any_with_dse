@@ -437,16 +437,28 @@ RULES:
 
         fund_metrics = {
             "market_cap": mcap_val, "pe_ratio": pe_val, "eps_ttm": eps_val,
-            "revenue_ttm": rev_val, "beta": beta_val, "dividend_yield": div_val,
-            "52w_high": hi52_val, "52w_low": lo52_val, "50d_sma": sma50_val,
+            "revenue_ttm": rev_val, "dividend_yield": div_val,
+            "50d_sma": sma50_val,
             "net_income_q": net_income_val,
             "gross_profit_q": gross_profit_val,
             "operating_income_q": operating_income_val,
-            "ebitda_q": ebitda_val,
             "free_cash_flow_q": free_cash_flow_val,
             "net_debt": net_debt_val,
             "total_debt": total_debt_val,
         }
+        # ✅ CHANGED (per explicit request): beta / 52-week high-low / EBITDA
+        # dropped for DSE tickers only -- beta and 52-week range are never
+        # populated at all for DSE (not published on the dsebd.org snapshot
+        # page, set to "N/A" unconditionally in the DSE branch above), and
+        # ebitda_q depends on an LLM-inferred figure from the statement PDF
+        # that isn't reliable enough to show as a headline metric. Non-DSE
+        # (yfinance-backed) tickers keep all four -- those come from real
+        # market data and are worth showing.
+        if not _is_dse:
+            fund_metrics["beta"] = beta_val
+            fund_metrics["52w_high"] = hi52_val
+            fund_metrics["52w_low"] = lo52_val
+            fund_metrics["ebitda_q"] = ebitda_val
         # 🔧 TEMP DEBUG: surfaces what get_fundamentals actually returned,
         # right in the same "metrics" panel you already screenshot -- no
         # need to dig through Railway logs. If everything above is N/A,
