@@ -13,12 +13,31 @@ const SIDE_STYLES: Record<string, string> = {
   neutral: "border-border bg-bg-raised",
 };
 
-export function DebatePanel({ debate }: { debate: DebateState | null }) {
-  if (!debate || debate.turns.length === 0) {
+export function DebatePanel({
+  debate,
+  sides,
+  title = "AI Debate",
+  emptyDescription,
+}: {
+  debate: DebateState | null;
+  /** Only show turns whose `side` (lowercased) is in this list. Omit to show everything. */
+  sides?: string[];
+  title?: string;
+  emptyDescription?: string;
+}) {
+  const turns = (debate?.turns ?? []).filter(
+    (t) => !sides || sides.includes(t.side.toLowerCase()),
+  );
+
+  if (turns.length === 0) {
     return (
       <Card>
-        <CardHeader title="AI Debate" subtitle="Bull vs. bear investment debate, then risk debate." />
-        <EmptyState icon={<Swords className="size-5" />} title="No debate recorded for this run" />
+        <CardHeader title={title} subtitle="Bull vs. bear investment debate, then risk debate." />
+        <EmptyState
+          icon={<Swords className="size-5" />}
+          title="No debate recorded for this run"
+          description={emptyDescription}
+        />
       </Card>
     );
   }
@@ -26,11 +45,11 @@ export function DebatePanel({ debate }: { debate: DebateState | null }) {
   return (
     <Card>
       <CardHeader
-        title="AI Debate"
-        subtitle={debate.winner ? `Winning side: ${debate.winner}` : "Bull vs. bear investment debate."}
+        title={title}
+        subtitle={debate?.winner ? `Winning side: ${debate.winner}` : "Bull vs. bear investment debate."}
       />
       <ol className="space-y-3">
-        {debate.turns.map((turn, i) => (
+        {turns.map((turn, i) => (
           <li
             key={i}
             className={cn(
@@ -51,7 +70,7 @@ export function DebatePanel({ debate }: { debate: DebateState | null }) {
           </li>
         ))}
       </ol>
-      {debate.summary ? (
+      {!sides && debate?.summary ? (
         <div className="mt-4 rounded-lg border border-border-soft bg-bg-raised p-3">
           <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-text-faint">Summary</p>
           <p className="text-xs leading-relaxed text-text-muted">{debate.summary}</p>
