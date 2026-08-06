@@ -6,12 +6,10 @@ import { ArrowLeft, Clock, Cpu, RefreshCw } from "lucide-react";
 import { analysisApi, ApiError } from "@/lib/api";
 import { useAnalysis } from "@/hooks/useAnalysis";
 import { useAnalysisSocket } from "@/hooks/useAnalysisSocket";
-import { AGENT_LABELS } from "@/lib/constants";
 import { formatDateTime } from "@/lib/utils";
 import { Badge, SignalBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ErrorState, LoadingState } from "@/components/ui/States";
-import { AgentCard } from "@/components/analysis/AgentCard";
 import { PipelineFlowPanel } from "@/components/analysis/PipelineFlowPanel";
 import { RecommendationPanel } from "@/components/analysis/RecommendationPanel";
 import { StageTabs } from "@/components/analysis/StageTabs";
@@ -69,16 +67,6 @@ export default function AnalysisDetailPage({ params }: { params: Promise<{ id: s
       <PipelineFlowPanel pipeline={analysis.pipeline} />
 
       <RecommendationPanel recommendation={analysis.recommendation} />
-
-      <div>
-        <h2 className="mb-3 text-sm font-semibold text-text">Agent analyses — at a glance</h2>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <AgentCard label={AGENT_LABELS.technical} agent={analysis.technical} />
-          <AgentCard label={AGENT_LABELS.fundamental} agent={analysis.fundamental} />
-          <AgentCard label={AGENT_LABELS.news} agent={analysis.news} />
-          <AgentCard label={AGENT_LABELS.sentiment} agent={analysis.sentiment} />
-        </div>
-      </div>
 
       <StageTabs analysis={analysis} />
 
