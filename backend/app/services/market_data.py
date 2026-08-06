@@ -165,7 +165,6 @@ async def get_fundamentals_check(ticker: str) -> dict:
     from tradingagents.dataflows import dse_fundamentals
     curr_date = datetime.now().strftime("%Y-%m-%d")
     return await asyncio.to_thread(dse_fundamentals.quick_check, ticker, curr_date)
-<<<<<<< HEAD
 
 
 # ✅ ADDED — backs the new PDF-upload feature (app/api/routes/stocks.py's
@@ -238,5 +237,3 @@ async def list_dse_reports(ticker: str) -> dict:
         }
 
     return await asyncio.to_thread(_list)
-=======
->>>>>>> ade75414b6567b17d70c76d7f1b7d5363ff039b5

@@ -23,10 +23,7 @@ export interface NavItem {
     | "backtest"
     | "paper-trading"
     | "fundamentals-check"
-<<<<<<< HEAD
     | "reports"
-=======
->>>>>>> ade75414b6567b17d70c76d7f1b7d5363ff039b5
     | "settings";
 }
 
@@ -39,10 +36,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/dataset", label: "Dataset Explorer", icon: "dataset" },
   { href: "/news", label: "News", icon: "news" },
   { href: "/fundamentals-check", label: "Fundamentals Check", icon: "fundamentals-check" },
-<<<<<<< HEAD
   { href: "/reports", label: "Annual Reports (PDF)", icon: "reports" },
-=======
->>>>>>> ade75414b6567b17d70c76d7f1b7d5363ff039b5
   { href: "/memory", label: "Memory", icon: "memory" },
   { href: "/settings", label: "Settings", icon: "settings" },
 ];

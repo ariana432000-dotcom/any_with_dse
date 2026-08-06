@@ -14,11 +14,8 @@ import type {
   DatasetListResponse,
   DatasetRowsResponse,
   DispatchBackgroundResponse,
-<<<<<<< HEAD
   DseReportsListResponse,
   DseReportUploadResponse,
-=======
->>>>>>> ade75414b6567b17d70c76d7f1b7d5363ff039b5
   ExecutionRequest,
   FundamentalsCheckResponse,
   Health,
@@ -66,7 +63,6 @@ async function request<T>(
 
   let res: Response;
   try {
-<<<<<<< HEAD
     // ✅ CHANGED: forcing "Content-Type": "application/json" unconditionally
     // broke file uploads -- a FormData body needs the browser to set its
     // own "multipart/form-data; boundary=..." header automatically; a
@@ -74,17 +70,11 @@ async function request<T>(
     // boundary and the backend's UploadFile parsing would fail. Every
     // existing JSON call site is unaffected (rest.body stays a string).
     const isFormData = typeof FormData !== "undefined" && rest.body instanceof FormData;
-=======
->>>>>>> ade75414b6567b17d70c76d7f1b7d5363ff039b5
     res = await fetch(`${API_V1}${path}`, {
       ...rest,
       signal: controller.signal,
       headers: {
-<<<<<<< HEAD
         ...(isFormData ? {} : { "Content-Type": "application/json" }),
-=======
-        "Content-Type": "application/json",
->>>>>>> ade75414b6567b17d70c76d7f1b7d5363ff039b5
         ...(rest.headers ?? {}),
       },
       cache: "no-store",
@@ -321,7 +311,6 @@ export const stocksApi = {
       `/stocks/${encodeURIComponent(ticker)}/fundamentals/check`,
       { timeoutMs: 20_000 },
     ),
-<<<<<<< HEAD
 
   listReports: (ticker: string) =>
     request<DseReportsListResponse>(
@@ -338,6 +327,4 @@ export const stocksApi = {
       { method: "POST", body: form, timeoutMs: 60_000 },
     );
   },
-=======
->>>>>>> ade75414b6567b17d70c76d7f1b7d5363ff039b5
 };
