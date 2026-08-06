@@ -6,6 +6,12 @@ import { formatCurrency } from "@/lib/utils";
 import { EmptyState } from "@/components/ui/States";
 import { Target } from "lucide-react";
 
+function pctChange(from: number, to: number): string {
+  const pct = ((to - from) / from) * 100;
+  const sign = pct > 0 ? "+" : "";
+  return `${sign}${pct.toFixed(1)}%`;
+}
+
 export function RecommendationPanel({ recommendation }: { recommendation: RecommendationState | null }) {
   if (!recommendation) {
     return (
@@ -17,6 +23,9 @@ export function RecommendationPanel({ recommendation }: { recommendation: Recomm
   }
 
   const r = recommendation;
+  const hasEntry = r.entry_price !== null && r.entry_price !== undefined;
+  const takeProfitPct = hasEntry && r.take_profit != null ? pctChange(r.entry_price!, r.take_profit) : null;
+  const stopLossPct = hasEntry && r.stop_loss != null ? pctChange(r.entry_price!, r.stop_loss) : null;
 
   return (
     <Card>
@@ -39,12 +48,29 @@ export function RecommendationPanel({ recommendation }: { recommendation: Recomm
         <div>
           <p className="text-[10px] uppercase tracking-wide text-text-faint">Stop loss</p>
           <p className="font-mono text-sm font-medium text-sell">{formatCurrency(r.stop_loss)}</p>
+          {stopLossPct ? <p className="font-mono text-[11px] text-sell/80">{stopLossPct} if hit</p> : null}
         </div>
         <div>
           <p className="text-[10px] uppercase tracking-wide text-text-faint">Take profit</p>
           <p className="font-mono text-sm font-medium text-buy">{formatCurrency(r.take_profit)}</p>
+          {takeProfitPct ? <p className="font-mono text-[11px] text-buy/80">{takeProfitPct} if hit</p> : null}
         </div>
       </div>
+      {(takeProfitPct || stopLossPct) && (
+        <p className="mt-2 text-[11px] text-text-faint">
+          Planned exit levels from this analysis, not a price forecast — the %/gain-loss shown is only what
+          would result <em>if</em> that level is reached, whenever that happens to be.
+        </p>
+      )}
+
+      {r.reasoning ? (
+        <div className="mt-4 border-t border-border-soft pt-4">
+          <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-text-faint">
+            Why {r.signal.toString().toUpperCase()}
+          </p>
+          <p className="text-xs leading-relaxed text-text-muted">{r.reasoning}</p>
+        </div>
+      ) : null}
 
       {(r.bull_case || r.bear_case) && (
         <div className="mt-4 grid gap-3 border-t border-border-soft pt-4 sm:grid-cols-2">
