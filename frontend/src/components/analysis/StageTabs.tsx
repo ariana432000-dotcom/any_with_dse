@@ -6,7 +6,6 @@ import { STAGE_META, STAGE_GROUPS } from "@/lib/pipelineStages";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Tabs } from "@/components/ui/Tabs";
 import { Badge, SignalBadge } from "@/components/ui/Badge";
-import { SignalGauge } from "@/components/ui/SignalGauge";
 import { EmptyState } from "@/components/ui/States";
 import { ValueBlock } from "@/components/analysis/PipelineFlowPanel";
 import { DebatePanel } from "@/components/analysis/DebatePanel";
@@ -26,19 +25,20 @@ function AgentFullView({ label, agent }: { label: string; agent: AgentView | nul
   }
   return (
     <div>
-      <div className="mb-4 flex items-center gap-4">
-        <SignalGauge signal={agent.signal} confidence={agent.confidence} size={72} strokeWidth={6} />
-        <div>
-          {!agent.ok ? (
-            <Badge tone="sell">
-              <AlertCircle className="size-3" />
-              Failed
-            </Badge>
-          ) : null}
-          <p className="mt-1 font-mono text-[11px] text-text-faint">
-            {agent.latency_ms > 0 ? `${Math.round(agent.latency_ms)}ms` : ""}
-          </p>
-        </div>
+      <div className="mb-4 flex items-center gap-3">
+        <SignalBadge signal={agent.signal} />
+        <span className="font-mono text-xs text-text-faint">
+          confidence {Math.round(Math.min(1, Math.max(0, agent.confidence)) * 100)}%
+        </span>
+        {!agent.ok ? (
+          <Badge tone="sell">
+            <AlertCircle className="size-3" />
+            Failed
+          </Badge>
+        ) : null}
+        {agent.latency_ms > 0 ? (
+          <span className="font-mono text-[11px] text-text-faint">{Math.round(agent.latency_ms)}ms</span>
+        ) : null}
       </div>
       <p className="whitespace-pre-line text-xs leading-relaxed text-text-muted">
         {agent.error || agent.analysis || "No analysis text returned."}
