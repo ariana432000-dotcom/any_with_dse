@@ -1,6 +1,5 @@
 import type { RecommendationState } from "@/lib/types";
 import { Card, CardHeader } from "@/components/ui/Card";
-import { SignalGauge } from "@/components/ui/SignalGauge";
 import { SignalBadge } from "@/components/ui/Badge";
 import { formatCurrency } from "@/lib/utils";
 import { EmptyState } from "@/components/ui/States";
@@ -31,8 +30,10 @@ export function RecommendationPanel({ recommendation }: { recommendation: Recomm
     <Card>
       <CardHeader title="Recommendation" action={<SignalBadge signal={r.signal} />} />
       <div className="flex items-center gap-4">
-        <SignalGauge signal={r.signal} confidence={r.confidence} size={88} strokeWidth={7} label="conf" />
         <div className="min-w-0 flex-1">
+          <p className="mb-1.5 font-mono text-xs text-text-faint">
+            confidence {Math.round(Math.min(1, Math.max(0, r.confidence)) * 100)}%
+          </p>
           <p className="text-sm leading-relaxed text-text">{r.summary || r.reasoning || "No summary provided."}</p>
           {r.time_horizon ? (
             <p className="mt-1.5 text-xs text-text-faint">Time horizon: {r.time_horizon}</p>
@@ -71,23 +72,6 @@ export function RecommendationPanel({ recommendation }: { recommendation: Recomm
           <p className="text-xs leading-relaxed text-text-muted">{r.reasoning}</p>
         </div>
       ) : null}
-
-      {(r.bull_case || r.bear_case) && (
-        <div className="mt-4 grid gap-3 border-t border-border-soft pt-4 sm:grid-cols-2">
-          {r.bull_case ? (
-            <div className="rounded-lg border border-buy/25 bg-buy-soft p-3">
-              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-buy">Bull case</p>
-              <p className="text-xs leading-relaxed text-text-muted">{r.bull_case}</p>
-            </div>
-          ) : null}
-          {r.bear_case ? (
-            <div className="rounded-lg border border-sell/25 bg-sell-soft p-3">
-              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-sell">Bear case</p>
-              <p className="text-xs leading-relaxed text-text-muted">{r.bear_case}</p>
-            </div>
-          ) : null}
-        </div>
-      )}
     </Card>
   );
 }
