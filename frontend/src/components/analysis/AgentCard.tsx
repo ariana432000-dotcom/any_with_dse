@@ -1,6 +1,6 @@
 import type { AgentView } from "@/lib/types";
 import { Card } from "@/components/ui/Card";
-import { SignalGauge } from "@/components/ui/SignalGauge";
+import { SignalBadge } from "@/components/ui/Badge";
 import { Badge } from "@/components/ui/Badge";
 import { AlertCircle } from "lucide-react";
 
@@ -30,7 +30,12 @@ export function AgentCard({ label, agent }: { label: string; agent: AgentView | 
             </p>
           )}
         </div>
-        <SignalGauge signal={agent.signal} confidence={agent.confidence} size={56} strokeWidth={5} />
+        <div className="text-right">
+          <SignalBadge signal={agent.signal} />
+          <p className="mt-1 font-mono text-[11px] text-text-faint">
+            {Math.round(Math.min(1, Math.max(0, agent.confidence)) * 100)}%
+          </p>
+        </div>
       </div>
       <p className="mt-3 line-clamp-4 text-xs leading-relaxed text-text-muted">
         {agent.error || agent.analysis || "No analysis text returned."}
