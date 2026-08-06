@@ -339,7 +339,45 @@ def create_fundamentals_analyst(llm, log=print):
             net_debt_val = fmt(bs_rows.get("Net Debt", "N/A"))
             total_debt_val = fmt(bs_rows.get("Total Debt", "N/A"))
 
-        data_summary = f"""
+        # ✅ CHANGED (per explicit request): for DSE tickers, Beta and Stock
+        # Buybacks aren't just "not fetched yet" -- they're concepts DSE-
+        # listed companies' disclosures don't report at all (no beta
+        # calculation is published anywhere on dsebd.org, and share
+        # buybacks aren't standard practice/reporting line item for
+        # Bangladeshi listed companies the way US 10-Q "Repurchase Of
+        # Capital Stock" is). Showing them as permanent "N/A" rows made
+        # the report look more incomplete than it really is and risked
+        # nudging the LLM toward extra caution over fields that were never
+        # going to have data. Omitted entirely for DSE tickers rather than
+        # displayed empty; kept for the non-DSE (yfinance/FMP) path where
+        # they're genuine, normally-populated fields.
+        if _is_dse:
+            data_summary = f"""
+COMPANY: {company} | DATE: {current_date}
+
+MARKET DATA:
+- Market Cap: {mcap_val}
+- P/E Ratio: {pe_val}
+- EPS: {eps_val}
+- Revenue: {rev_val}
+- {div_label}: {div_val}%
+- 50-Day SMA: {sma50_val}
+
+MOST RECENT QUARTER (income statement):
+- Net Income: {net_income_val}
+- Gross Profit: {gross_profit_val}
+- Operating Income: {operating_income_val}
+- EBITDA: {ebitda_val}
+
+CASH FLOW (most recent quarter):
+- Free Cash Flow: {free_cash_flow_val}
+
+BALANCE SHEET (most recent quarter):
+- Net Debt: {net_debt_val}
+- Total Debt: {total_debt_val}
+"""
+        else:
+            data_summary = f"""
 COMPANY: {company} | DATE: {current_date}
 
 MARKET DATA (TTM):
@@ -376,6 +414,16 @@ End with a Markdown table and: FINAL TRANSACTION PROPOSAL: **BUY** / **HOLD** / 
 RULES:
 - Use ONLY the numbers below. Do NOT invent any figures.
 - If a metric shows N/A, say "data not available".
+- Missing/N/A fields are a normal, common limitation -- by themselves they
+  are NOT a reason to default to HOLD. Base your verdict on what the
+  available numbers actually show. If the core figures you DO have (P/E,
+  EPS, revenue, profitability, debt levels) clearly point one direction,
+  give a decisive BUY or SELL and say plainly which data points you
+  couldn't factor in and why that doesn't change the call.
+- Reserve HOLD for when the available data is itself genuinely mixed or
+  conflicting (e.g. strong profitability but rising debt, or a cheap P/E
+  alongside deteriorating cash flow) -- not merely incomplete. "I don't
+  have every field" is not a basis for HOLD on its own.
 
 {data_summary}
 """ + U["get_language_instruction"]()
