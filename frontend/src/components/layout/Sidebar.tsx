@@ -7,7 +7,10 @@ import {
   Brain,
   ClipboardCheck,
   Database,
+<<<<<<< HEAD
   FileText,
+=======
+>>>>>>> ade75414b6567b17d70c76d7f1b7d5363ff039b5
   LayoutDashboard,
   LineChart,
   type LucideIcon,
@@ -34,7 +37,10 @@ const ICONS: Record<NavItem["icon"], LucideIcon> = {
   backtest: BarChart3,
   "paper-trading": Wallet,
   "fundamentals-check": ClipboardCheck,
+<<<<<<< HEAD
   reports: FileText,
+=======
+>>>>>>> ade75414b6567b17d70c76d7f1b7d5363ff039b5
   settings: Settings,
 };
 

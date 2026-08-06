@@ -512,6 +512,7 @@ export interface FundamentalsCheckResponse {
   raw_response: string;
 }
 
+<<<<<<< HEAD
 export interface DseReportsListResponse {
   ticker: string;
   uploaded_fiscal_years: string[];
@@ -526,6 +527,8 @@ export interface DseReportUploadResponse {
   bytes: number;
 }
 
+=======
+>>>>>>> ade75414b6567b17d70c76d7f1b7d5363ff039b5
 // ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+<<<<<<< HEAD
 from fastapi import APIRouter, Query, UploadFile, File, Form, HTTPException
+=======
+from fastapi import APIRouter, Query
+>>>>>>> ade75414b6567b17d70c76d7f1b7d5363ff039b5
 
 from app.services import market_data as mds
 
@@ -44,6 +48,7 @@ async def fundamentals_check(ticker: str) -> dict:
     fundamentals/check, which 404'd since app.services.market_data's
     get_fundamentals_check() existed but was never wired to a route."""
     return await mds.get_fundamentals_check(ticker)
+<<<<<<< HEAD
 
 
 # ✅ ADDED — dsebd.org's robots.txt disallows automated download of annual
@@ -79,3 +84,5 @@ async def upload_report(
         raise HTTPException(status_code=400, detail="File too large (max 25MB).")
     saved_path = await mds.save_dse_report(ticker.upper(), fiscal_year.strip(), contents)
     return {"ticker": ticker.upper(), "fiscal_year": fiscal_year.strip(), "saved_to": saved_path, "bytes": len(contents)}
+=======
+>>>>>>> ade75414b6567b17d70c76d7f1b7d5363ff039b5
