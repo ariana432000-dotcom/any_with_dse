@@ -12,15 +12,10 @@ import { Badge, SignalBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ErrorState, LoadingState } from "@/components/ui/States";
 import { AgentCard } from "@/components/analysis/AgentCard";
-import { DebatePanel } from "@/components/analysis/DebatePanel";
 import { PipelineFlowPanel } from "@/components/analysis/PipelineFlowPanel";
 import { RecommendationPanel } from "@/components/analysis/RecommendationPanel";
-import { RiskPortfolioPanel } from "@/components/analysis/RiskPortfolioPanel";
-import { AnalysisMemoryPanel } from "@/components/analysis/AnalysisMemoryPanel";
+import { StageTabs } from "@/components/analysis/StageTabs";
 import { AnalysisProgress } from "@/components/analysis/AnalysisProgress";
-import { MacroRegimePanel } from "@/components/analysis/MacroRegimePanel";
-import { PostMortemPanel } from "@/components/analysis/PostMortemPanel";
-import { VerifierPanel } from "@/components/analysis/VerifierPanel";
 
 const ACTIVE_STATUSES = new Set(["PENDING", "RUNNING"]);
 
@@ -74,10 +69,9 @@ export default function AnalysisDetailPage({ params }: { params: Promise<{ id: s
       <PipelineFlowPanel pipeline={analysis.pipeline} />
 
       <RecommendationPanel recommendation={analysis.recommendation} />
-      <VerifierPanel verifier={analysis.verifier} />
 
       <div>
-        <h2 className="mb-3 text-sm font-semibold text-text">Agent analyses</h2>
+        <h2 className="mb-3 text-sm font-semibold text-text">Agent analyses — at a glance</h2>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <AgentCard label={AGENT_LABELS.technical} agent={analysis.technical} />
           <AgentCard label={AGENT_LABELS.fundamental} agent={analysis.fundamental} />
@@ -86,11 +80,7 @@ export default function AnalysisDetailPage({ params }: { params: Promise<{ id: s
         </div>
       </div>
 
-      <MacroRegimePanel macro={analysis.macro} />
-      <DebatePanel debate={analysis.debate} />
-      <AnalysisMemoryPanel memory={analysis.memory} />
-      <PostMortemPanel postMortem={analysis.post_mortem} />
-      <RiskPortfolioPanel risk={analysis.risk} portfolio={analysis.portfolio} />
+      <StageTabs analysis={analysis} />
 
       <div className="rounded-xl border border-border-soft bg-panel p-5">
         <div className="mb-3 flex items-center justify-between">
