@@ -244,8 +244,14 @@ def create_fundamentals_analyst(llm, log=print):
             # than a true yield. Labeling it "Dividend Yield" in the report
             # asserts a calculation that was never actually done.
             div_label = "Last Declared Dividend (% of face value, not a computed yield)"
-            # Not published on the DSE snapshot page at all -- left N/A
-            # rather than guessed, per the "never invent data" rule below.
+            # 🔴 FIXED: rev_val used to stay hardcoded "N/A" for DSE tickers
+            # unconditionally -- true for the dsebd.org snapshot page (which
+            # really doesn't publish it), but WRONG once a statement PDF is
+            # on disk: totalRevenue is a real field in the DSE extractor's
+            # income-statement schema (confirmed against a real quarterly
+            # filing, BATBC Q1 2026 -- "Net revenue from contracts with
+            # customers"). Placeholder here; overwritten below once
+            # inc_rows is available, same pattern as net_income_val etc.
             rev_val = "N/A"
             beta_val = "N/A"
             hi52_val = "N/A"
@@ -276,6 +282,12 @@ def create_fundamentals_analyst(llm, log=print):
                                                   "netIncome", "ebitda"])
             cf_rows = extract_dict_numbers(cf, ["operatingCashflow", "capitalExpenditures"])
             bs_rows = extract_dict_numbers(bs, ["longTermDebt", "shortTermDebt", "cashAndCashEquivalents"])
+
+            # Now that inc_rows exists, use it for revenue if the statement
+            # PDF actually had a figure -- otherwise rev_val stays "N/A"
+            # (still true when there's no PDF on disk at all).
+            if "totalRevenue" in inc_rows:
+                rev_val = fmt(inc_rows["totalRevenue"])
 
             net_income_val = fmt(inc_rows.get("netIncome", "N/A"))
             gross_profit_val = fmt(inc_rows.get("grossProfit", "N/A"))
@@ -1321,14 +1333,23 @@ Be concise and only flag REAL, severe discrepancies -- do not invent problems.
 def run_decision_verifier(final_decision_text: str, indicators: dict, fund_metrics: dict,
                           news_metrics: dict, fundamentals_report: str, llm,
                           is_dse: bool = False, log=print) -> dict:
-    """Runs all three checks and returns VERIFIED/FLAGGED status. If the
-    Fundamentals Analyst's own hard verdict directly contradicts the final
-    signal, the effective/actionable signal is auto-downgraded to HOLD —
-    better to sit out than trade on an unresolved internal contradiction."""
+    """Runs all three checks and returns VERIFIED/FLAGGED status.
+
+    ✅ CHANGED (per explicit request): the rule-based fundamentals-
+    contradiction check is now advisory-only, same as the LLM semantic
+    check -- still computed and shown in `notes` for transparency, but it
+    no longer flips `status` to FLAGGED and no longer auto-overrides
+    `effective_signal` to HOLD. Only the deterministic numeric-
+    contradiction check and the LLM call itself failing/not following the
+    expected format can flag status now. If you want the old
+    contradiction-blocks-the-trade behavior back, that's a one-line
+    revert: re-add `rule_warnings` to the `status =` line below and
+    restore the auto-override block that used to follow it (see git
+    history / prior version of this function)."""
     sig_match = re.search(r"\*{0,2}(BUY|HOLD|SELL)\*{0,2}", final_decision_text, re.IGNORECASE)
     final_signal = sig_match.group(1).upper() if sig_match else "N/A"
 
-    log("running rule-based checks")
+    log("running rule-based checks (advisory only -- does not flag status)")
     rule_warnings, rule_info_notes = rule_based_checks(
         final_signal, indicators, news_metrics, fundamentals_report=fundamentals_report)
 
@@ -1343,15 +1364,15 @@ def run_decision_verifier(final_decision_text: str, indicators: dict, fund_metri
     signal_consistent_m = re.search(r"SIGNAL_CONSISTENT:\s*(YES|NO)", llm_notes, re.IGNORECASE)
     markers_missing = signal_consistent_m is None
 
-    # Status is decided only by hard/reliable signals: rule-based
-    # contradiction, code-verified numeric mismatch, or the LLM call
-    # failing/not following the format. The LLM's own SIGNAL_CONSISTENT
-    # opinion is advisory and never flips status by itself.
-    status = "FLAGGED" if (rule_warnings or numeric_mismatches or llm_call_failed or markers_missing) else "VERIFIED"
+    # Status is decided only by hard/reliable signals: code-verified
+    # numeric mismatch, or the LLM call failing/not following the format.
+    # Both the rule-based fundamentals-contradiction check AND the LLM's
+    # own SIGNAL_CONSISTENT opinion are advisory and never flip status.
+    status = "FLAGGED" if (numeric_mismatches or llm_call_failed or markers_missing) else "VERIFIED"
 
     notes_parts = []
     if rule_warnings:
-        notes_parts.append("Rule-based: " + " | ".join(rule_warnings))
+        notes_parts.append("Rule-based (advisory, does NOT affect status): " + " | ".join(rule_warnings))
     if rule_info_notes:
         notes_parts.append("Rule-based (info, non-flagging): " + " | ".join(rule_info_notes))
     if numeric_mismatches:
@@ -1359,18 +1380,15 @@ def run_decision_verifier(final_decision_text: str, indicators: dict, fund_metri
     notes_parts.append("LLM semantic check (advisory, does NOT affect status): " + llm_notes)
     notes = "\n".join(notes_parts)
 
-    fundamentals_contradiction = any("Fundamentals Analyst said" in w for w in rule_warnings)
+    # ✅ CHANGED: auto-override removed along with the status effect -- an
+    # "advisory, does not affect status" check silently forcing the
+    # actionable signal to HOLD anyway would be a confusing half-state
+    # (VERIFIED status, but the real signal changed underneath it).
+    # effective_signal now always matches final_signal.
     effective_signal = final_signal
-    auto_overridden = fundamentals_contradiction and final_signal != "HOLD"
-    if auto_overridden:
-        effective_signal = "HOLD"
-        notes += (
-            f"\n\nAUTO-OVERRIDE: direct contradiction with the Fundamentals Analyst's verdict — "
-            f"raw signal was {final_signal}, effective/actionable signal forced to HOLD. "
-            f"Safer not to trade without resolving the contradiction."
-        )
+    auto_overridden = False
 
-    log(f"verification status: {status}" + (" (auto-overridden to HOLD)" if auto_overridden else ""))
+    log(f"verification status: {status}")
     return {
         "status": status, "notes": notes, "final_signal": final_signal,
         "effective_signal": effective_signal, "auto_overridden": auto_overridden,
