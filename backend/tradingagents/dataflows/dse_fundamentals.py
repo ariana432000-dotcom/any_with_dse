@@ -211,7 +211,7 @@ def get_fundamentals(ticker: str, curr_date: str = None) -> str:
         return error
 
     wanted_keywords = [
-        "last trading price", "closing price", "face value", "market category",
+        "last trading price", "closing price", "face", "market category",
         "sector", "pe(x)", "p/e", "price earning", "eps", "nav per share",
         "nav(per share)", "market capitalization", "market cap",
         "dividend", "sponsor", "govt", "institute", "foreign", "public",
