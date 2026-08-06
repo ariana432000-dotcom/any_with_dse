@@ -1230,17 +1230,34 @@ def _extract_cited_number(text: str, label_patterns: list[str]) -> float | None:
 
 
 def check_numeric_contradiction(final_decision_text: str, indicators: dict,
-                                fund_metrics: dict) -> list[str]:
+                                fund_metrics: dict, skip_eps: bool = False) -> list[str]:
     """Compares every number the decision text cites against the raw
     ground-truth value, with a generous rounding tolerance (2% relative or
     0.5 absolute) so "same number, fewer decimals" is never confused with a
-    genuinely wrong figure. Pure Python — no LLM arithmetic judgment."""
+    genuinely wrong figure. Pure Python — no LLM arithmetic judgment.
+
+    ✅ CHANGED: `skip_eps` -- confirmed live (BATBC) that DSE tickers
+    routinely have SEVERAL simultaneously-valid, genuinely-different EPS
+    figures on the books at once (Q1-only, H1 cumulative, prior-year
+    comparative, last full audited year -- e.g. BATBC's own disclosures
+    show 3.88 for Q1 2026 alone vs a cumulative/derived ~7.65 for H1).
+    fund_metrics only ever holds ONE of these. A tolerance check assumes
+    there's a single ground truth the decision text should match, which
+    doesn't hold here -- the LLM legitimately citing a *different*,
+    equally-real EPS figure than the one in fund_metrics isn't an error,
+    and this check has no way to tell that apart from an actual
+    hallucinated number. Set skip_eps=True (DSE tickers) rather than
+    guess a looser tolerance, since no fixed tolerance is principled when
+    the two numbers are correctly describing different reporting
+    periods. RSI/MACD/P-E aren't affected -- those remain single-valued
+    for a given ticker+date."""
     checks = [
         ("RSI", ["RSI"], indicators.get("rsi")),
         ("MACD", ["MACD"], indicators.get("macd")),
         ("P/E Ratio", ["P/E Ratio", "P/E"], fund_metrics.get("pe_ratio")),
-        ("EPS (TTM)", [r"EPS \(TTM\)", "EPS"], fund_metrics.get("eps_ttm")),
     ]
+    if not skip_eps:
+        checks.append(("EPS (TTM)", [r"EPS \(TTM\)", "EPS"], fund_metrics.get("eps_ttm")))
     mismatches = []
     for label, patterns, raw in checks:
         if raw in (None, "", "N/A"):
@@ -1303,7 +1320,7 @@ Be concise and only flag REAL, severe discrepancies -- do not invent problems.
 
 def run_decision_verifier(final_decision_text: str, indicators: dict, fund_metrics: dict,
                           news_metrics: dict, fundamentals_report: str, llm,
-                          log=print) -> dict:
+                          is_dse: bool = False, log=print) -> dict:
     """Runs all three checks and returns VERIFIED/FLAGGED status. If the
     Fundamentals Analyst's own hard verdict directly contradicts the final
     signal, the effective/actionable signal is auto-downgraded to HOLD —
@@ -1316,7 +1333,8 @@ def run_decision_verifier(final_decision_text: str, indicators: dict, fund_metri
         final_signal, indicators, news_metrics, fundamentals_report=fundamentals_report)
 
     log("running deterministic numeric-contradiction check")
-    numeric_mismatches = check_numeric_contradiction(final_decision_text, indicators, fund_metrics)
+    numeric_mismatches = check_numeric_contradiction(
+        final_decision_text, indicators, fund_metrics, skip_eps=is_dse)
 
     log("running advisory LLM semantic check")
     llm_notes = llm_signal_consistency_check(final_decision_text, llm)
@@ -1366,9 +1384,11 @@ def create_decision_verifier(llm, log=print):
         fund_metrics = state.get("fund_metrics", {})
         news_metrics = state.get("news_metrics", {})
         fundamentals_report = state.get("fundamentals_report", "")
+        from tradingagents.dataflows.symbol_utils import is_dse_ticker
+        is_dse = is_dse_ticker(state.get("company_of_interest", ""))
         result = run_decision_verifier(
             final_text, indicators, fund_metrics, news_metrics, fundamentals_report,
-            llm, log=log)
+            llm, is_dse=is_dse, log=log)
         return {"verification_result": result}
 
     return node
