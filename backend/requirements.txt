@@ -1,0 +1,51 @@
+# ---- web framework ----
+fastapi>=0.111
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+websockets>=12.0
+
+# ---- config / validation ----
+pydantic>=2.7
+pydantic-settings>=2.3
+
+# ---- databases (single local user — no Postgres/auth store needed) ----
+motor>=3.4
+redis>=5.0
+
+# ---- AI engine + memory (notebook pipeline; TradingAgents is the only AI
+# engine). langchain-anthropic is required — Anthropic (Claude Sonnet 5) is
+# now the default provider. langchain-ollama stays for the local/keyless
+# Ollama fallback (RAEM_LLM_PROVIDER=ollama) ----
+langchain>=0.2
+langchain-core>=0.2
+langchain-anthropic>=0.3   # ✅ ADDED — was imported but missing here, would
+                           # have crashed at runtime with the anthropic provider
+langchain-ollama>=0.1
+chromadb>=0.5
+markdown>=3.6
+sentence-transformers>=3.0   # local, keyless embedding provider for RAEM memory
+                             # (EMBEDDING_PROVIDER=sentence-transformers) — no
+                             # Ollama service and no external API key needed
+
+# ---- market data (keyless: yfinance/Stooq via TradingAgents + pipeline) ----
+yfinance>=0.2.40
+pandas>=2.2
+requests>=2.32
+stockstats>=0.6.2   # required by tradingagents/dataflows (technical indicators);
+                    # imported unconditionally, so every stage needs it, not just Market
+
+# ---- DSE (Bangladesh) vendor: bdshare (price/news/ticker-list) +
+# sharenews24.com scraping + annual-report PDF extraction (see
+# tradingagents/dataflows/dse_*.py and DSE_VENDOR_README.md) ----
+bdshare>=1.2       # maintained DSE scraper: OHLCV, trading-code list, news, P/E
+beautifulsoup4>=4.12
+pdfplumber>=0.11
+anthropic>=0.34   # raw SDK call in dse_statement_extractor.py, separate from langchain-anthropic above
+# playwright>=1.45  # optional — only needed to run tools/discover_stocknow_api.py locally
+
+# ---- background worker (periodic watchlist refresh + background analysis) ----
+apscheduler>=3.10
+celery>=5.3
+tzdata>=2024.1      # ensures zoneinfo("America/New_York") resolves on slim/Alpine
+                    # base images that don't ship a system tz database (used by
+                    # the dataset job's market-hours gate in workers/scheduler.py)

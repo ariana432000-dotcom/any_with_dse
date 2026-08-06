@@ -1,0 +1,151 @@
+# Local-only stack: no auth. TradingAgents (in-process, via the vendored
+# backend/tradingagents package) is the only AI engine. Default provider is
+# Anthropic (Claude Sonnet 5, ANTHROPIC_API_KEY in .env). EMBEDDING_PROVIDER
+# still defaults to ollama (nomic-embed-text) for ChromaDB memory — the
+# `ollama` service below runs that in-network with GPU passthrough (needed
+# on RunPod / any Linux host, since host.docker.internal only resolves on
+# Docker Desktop for Mac/Windows, not on plain Linux Docker). Set
+# EMBEDDING_PROVIDER=sentence-transformers in .env instead if you'd rather
+# skip GPU entirely and run this service-free.
+#
+# Services: web (Next.js dashboard), api (FastAPI backend), MongoDB, Ollama.
+# ChromaDB runs embedded inside the api/worker containers (persistent volume
+# `chromadata`), so no separate Chroma container is needed. Redis is kept
+# because it's required for two things the API already relies on: the
+# WebSocket pub/sub event bus and (optionally) the Celery broker for
+# background analysis runs. `worker` and `celery_worker` are optional — the
+# API still works with neither running (background analysis quietly falls
+# back to running in-process; the watchlist heartbeat just won't refresh).
+services:
+  # GPU-backed Ollama — serves embeddings (nomic-embed-text) and, if
+  # RAEM_LLM_PROVIDER=ollama is set in .env, the fallback LLM too. Requires
+  # the NVIDIA Container Toolkit on the host, which RunPod's GPU pod images
+  # ship with already. Reachable from other services as http://ollama:11434.
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: ["gpu"]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  mongo:
+    image: mongo:7
+    volumes:
+      - mongodata:/data/db
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: ./backend
+    env_file: .env
+    environment:
+      CHROMA_DB_PATH: /data/chroma
+      OLLAMA_BASE_URL: http://ollama:11434   # overrides whatever's in .env — in-network, not the host
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    volumes:
+      - chromadata:/data/chroma   # persistent ChromaDB — survives restarts
+      - datasetdata:/data/dataset # per-ticker CSV dataset (read by the Dataset Explorer page)
+    ports:
+      - "8000:8000"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  # Optional: periodic watchlist quote refresh + WebSocket heartbeat, and the
+  # scheduled dataset-export job (runs a full analysis per watchlist ticker
+  # every ~2h during market hours, appending to /data/dataset/{TICKER}.csv).
+  worker:
+    build: ./backend
+    env_file: .env
+    environment:
+      CHROMA_DB_PATH: /data/chroma
+      OLLAMA_BASE_URL: http://ollama:11434
+    depends_on:
+      api:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    volumes:
+      - chromadata:/data/chroma   # same persistent volume as api
+      - datasetdata:/data/dataset # same dataset volume as api
+    command: ["python", "-m", "app.workers.scheduler"]
+
+  # Optional: dedicated worker for background (non-blocking) analysis runs.
+  # Safe to remove — the API falls back to running analyses in-process
+  # if no Celery worker is present.
+  celery_worker:
+    build: ./backend
+    env_file: .env
+    environment:
+      CHROMA_DB_PATH: /data/chroma
+      OLLAMA_BASE_URL: http://ollama:11434
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    volumes:
+      - chromadata:/data/chroma   # shares ChromaDB with api
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker",
+              "--loglevel=info", "--queues=analysis", "--concurrency=2"]
+
+  # Next.js dashboard (src: ./frontend). Talks to the API directly from the
+  # browser (NEXT_PUBLIC_API_URL) — it does not proxy through this container.
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    depends_on:
+      api:
+        condition: service_started
+    ports:
+      - "3000:3000"
+
+volumes:
+  mongodata:
+  redisdata:
+  chromadata:
+  datasetdata:
+  ollama_data:
