@@ -507,7 +507,7 @@ class Orchestrator:
             time_horizon="1-4 weeks",
             bull_case=_side_case(state, "bull"),
             bear_case=_side_case(state, "bear"),
-            reasoning=pm_text[:2000] or "Synthesized from analyst consensus.",
+            reasoning=_extract_executive_summary(pm_text) or "Synthesized from analyst consensus.",
             summary=f"{signal.value} {state.ticker} · confidence {confidence:.0%} "
                     f"· regime {state.memory.regime if state.memory else 'N/A'}{override_note}",
         )
@@ -564,6 +564,24 @@ def _strip_html(html: str) -> str:
 def _extract(text: str, pattern: str, default: str = "") -> str:
     m = re.search(pattern, text or "", re.IGNORECASE)
     return m.group(1).upper() if m else default
+
+
+def _extract_executive_summary(pm_text: str) -> str:
+    """✅ CHANGED (per explicit request): the Recommendation panel's "Why
+    X" section was showing pm_text[:2000] -- render_pm_decision()'s FULL
+    rendered output (Rating + Executive Summary + Investment Thesis +
+    Price Target + Time Horizon all concatenated), which routinely ran
+    several paragraphs. PortfolioDecision.executive_summary is already
+    written to be short (its own field description says "Two to four
+    sentences"), so pulling just that section out gives the 2-3 line
+    answer the UI actually wants, without needing a second LLM call.
+    Falls back to the first ~400 chars of the full text if the marker
+    isn't found (e.g. structured output failed and this is the free-text
+    fallback path, which has no section headers to anchor on)."""
+    m = re.search(r"\*\*Executive Summary\*\*:\s*(.+?)(?:\n\n\*\*|\Z)", pm_text or "", re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return (pm_text or "").strip()[:400]
 
 
 def _extract_price(text: str, label_pattern: str) -> float | None:
