@@ -159,15 +159,24 @@ def _parse_label_value_tables(soup: BeautifulSoup) -> dict:
                     if label and value:
                         data[label] = value
         else:
+            # A genuine wide row (P/E ratio, EPS across dates) always has
+            # numeric or "-" cells after the label. A "Basic Info" grid
+            # row instead packs a SECOND real text label into cell[2]
+            # (e.g. "Face/par Value | 10.0 | Market Lot | 1") — use that
+            # to tell the two shapes apart before picking a value.
+            if len(cells) % 2 == 0 and cells[2] and not any(ch.isdigit() for ch in cells[2]):
+                for i in range(0, len(cells), 2):
+                    pair_label = cells[i].rstrip(":").strip()
+                    pair_value = cells[i + 1].strip()
+                    if pair_label and pair_value and pair_value.lower() not in no_value:
+                        data[pair_label] = pair_value
+                continue
+
             label = cells[0].rstrip(":").strip()
             value = _latest_numeric_cell(cells[1:])
             if not (label and value):
                 continue
             data[label] = value
-            # EPS sub-rows are often labeled just "Basic"/"Diluted*"
-            # rather than repeating "EPS" -- alias them so the "eps"
-            # keyword match downstream (wanted_keywords / g_dse) can find
-            # them under a recognizable name.
             low = label.lower()
             if low.startswith("basic"):
                 data["EPS (Basic)"] = value
