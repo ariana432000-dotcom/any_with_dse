@@ -120,9 +120,15 @@ def _extract_with_llm(statement_text: str, fiscal_year: str) -> dict:
     schema_hint = json.dumps(STATEMENT_SCHEMAS, indent=2)
 
     prompt = f"""You are extracting structured financial data from a Bangladeshi
-company's audited annual report (fiscal year {fiscal_year}). Figures may be
-reported in BDT thousands, lakhs, or crores -- normalize every number to
-plain BDT and record the original unit you saw in "reportedUnit".
+company's financial statement (label used for this file: {fiscal_year}).
+This may be an audited ANNUAL report or an UN-AUDITED QUARTERLY/interim
+report -- read the document's own text (e.g. "for the three-month period
+ended...", "Un-audited interim condensed financial statements", "Audited
+Financial Statements") to determine which, and record the ACTUAL period
+end date you find in "fiscalDateEnding" (do not assume it matches
+{fiscal_year}). Figures may be reported in BDT thousands, lakhs, or
+crores -- normalize every number to plain BDT and record the original
+unit you saw in "reportedUnit".
 
 Return ONLY a JSON object with exactly these three top-level keys:
 "balance_sheet", "income_statement", "cashflow". Each value is a single
