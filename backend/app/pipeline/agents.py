@@ -124,17 +124,20 @@ def create_fundamentals_analyst(llm, log=print):
 
         from tradingagents.dataflows.symbol_utils import is_dse_ticker
         _is_dse = is_dse_ticker(company)
-        # 🔴 FIXED: get_balance_sheet/get_cashflow/get_income_statement
-        # default to freq="quarterly" at the LangChain tool-wrapper level
-        # (fundamental_data_tools.py) when freq isn't passed explicitly.
-        # dse_statement_extractor.get_statement() only ever populates data
-        # from annual-report PDFs -- passing freq="quarterly" doesn't
-        # change WHICH data it returns, only the dict key it's wrapped
-        # under ("quarterlyReports" instead of "annualReports"), which is
-        # harmless for extract_dict_numbers (keys inside that don't care
-        # about the wrapper), but is still the wrong semantic label and
-        # worth being explicit about now that this path is being exercised.
-        _stmt_freq = "annual" if _is_dse else "quarterly"
+        # 🔴 FIXED (reverted): a previous version of this set freq="annual"
+        # for DSE tickers, reasoning that dse_statement_extractor.py was
+        # built around annual-report PDFs. But this report's own field
+        # names (net_income_q, gross_profit_q, ...) and section label
+        # ("MOST RECENT QUARTER") were designed for QUARTERLY data --
+        # confirmed as the right call now that a real quarterly (Q1 2026
+        # un-audited) PDF is actually in use for this ticker. freq only
+        # controls which dict key the extracted data is wrapped under
+        # ("quarterlyReports" vs "annualReports") -- it doesn't change
+        # what get extracted -- so this now correctly matches what's
+        # really in the PDF instead of mislabeling quarterly figures as
+        # annual. Whichever type of PDF you actually place on disk for a
+        # ticker, request the freq that matches it.
+        _stmt_freq = "quarterly"
 
         tool_results = {}
         for tool_name, tool_fn, args in [
