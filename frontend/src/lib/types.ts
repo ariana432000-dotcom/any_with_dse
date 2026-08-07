@@ -143,6 +143,7 @@ export interface RecommendationState {
   bear_case: string;
   reasoning: string;
   summary: string;
+  currency: string;
 }
 
 export interface ExecutionMetadata {
