@@ -155,6 +155,13 @@ class RecommendationState(BaseModel):
     bear_case: str = ""
     reasoning: str = ""
     summary: str = ""
+    # 🔴 FIXED: entry_price/stop_loss/take_profit were always rendered with
+    # a hardcoded "$" (USD) prefix on the frontend (formatCurrency's
+    # currency: "USD" was never conditional) -- for a DSE ticker these are
+    # real BDT amounts, so a value like 241.00 displayed as "$241.00"
+    # rather than the correct "৳241.00", misrepresenting the number by
+    # ~120x if read as USD. Added so the frontend can format correctly.
+    currency: str = "USD"
 
 
 class PipelineStep(BaseModel):
