@@ -446,37 +446,35 @@ def _chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
 def _fetch_latest_close(company: str, as_of_date: str):
     """Latest close price for outcome backfill.
 
-    ✅ FIXED: this used to import get_stock_data straight from
-    tradingagents.agents.utils.agent_utils (yfinance-backed) — a second,
-    independent data source from the Market Analyst stage, which now uses
-    .data_providers (FMP). That meant entry_price (saved via the Market
-    Analyst, FMP) and exit_price (fetched here, yfinance) could come from
-    two different vendors for the same P&L calculation, and this call would
-    fail independently of the rest of the pipeline if yfinance rate-limited.
-    Now uses the same FMP-backed get_stock_data as everywhere else — one
-    consistent price source end-to-end.
+    🔴 FIXED (confirmed live): the previous version called
+    .data_providers.get_stock_data, which is hardcoded to FMP only.
+    FMP doesn't cover DSE-listed tickers at all -- so for ANY DSE ticker,
+    that call silently returned "no price data", this function returned
+    None, and backfill_pending_outcomes() always short-circuited to
+    "could not fetch today's close". PENDING episodes for DSE tickers
+    could therefore NEVER resolve to RESOLVED no matter how much time
+    passed, which is why Post-Mortem Review showed "No resolved episodes
+    yet" indefinitely for DSE tickers specifically -- not a "give it more
+    time" situation as it looked like, a genuine dead end.
+
+    Now goes through market_data.fetch_ohlcv(), which already correctly
+    routes DSE tickers to bdshare and everything else to yfinance/Stooq
+    -- the same function the price-history/quote endpoints rely on, so
+    this is one consistent source instead of a second, US-only one that
+    happened to work for non-DSE tickers by coincidence.
     """
-    try:
-        from .data_providers import get_stock_data
-    except ImportError:
-        return None
+    from .market_data import fetch_ohlcv
     end_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
     start_dt = end_dt - timedelta(days=10)
     try:
-        raw = get_stock_data.invoke({
-            "symbol": company,
-            "start_date": start_dt.strftime("%Y-%m-%d"),
-            "end_date": as_of_date,
-        })
+        rows = fetch_ohlcv(company, start_dt.strftime("%Y-%m-%d"), as_of_date)
     except Exception:  # noqa: BLE001
         return None
-    lines = [l for l in str(raw).split("\n") if l.strip() and not l.startswith("#")]
-    if len(lines) > 1:
-        for row in reversed(lines[1:]):
-            parts = row.split(",")
-            if len(parts) >= 5 and parts[4].strip() and parts[4].strip() not in ("", "Close"):
-                try:
-                    return float(parts[4].strip())
-                except ValueError:
-                    pass
+    for row in reversed(rows or []):
+        close = row.get("close")
+        if close is not None:
+            try:
+                return float(close)
+            except (TypeError, ValueError):
+                continue
     return None
