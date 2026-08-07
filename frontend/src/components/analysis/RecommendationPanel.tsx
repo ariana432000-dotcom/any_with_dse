@@ -22,6 +22,7 @@ export function RecommendationPanel({ recommendation }: { recommendation: Recomm
   }
 
   const r = recommendation;
+  const currency: "USD" | "BDT" = r.currency === "BDT" ? "BDT" : "USD";
   const hasEntry = r.entry_price !== null && r.entry_price !== undefined;
   const takeProfitPct = hasEntry && r.take_profit != null ? pctChange(r.entry_price!, r.take_profit) : null;
   const stopLossPct = hasEntry && r.stop_loss != null ? pctChange(r.entry_price!, r.stop_loss) : null;
@@ -44,16 +45,16 @@ export function RecommendationPanel({ recommendation }: { recommendation: Recomm
       <div className="mt-4 grid grid-cols-3 gap-3 border-t border-border-soft pt-4">
         <div>
           <p className="text-[10px] uppercase tracking-wide text-text-faint">Entry</p>
-          <p className="font-mono text-sm font-medium text-text">{formatCurrency(r.entry_price)}</p>
+          <p className="font-mono text-sm font-medium text-text">{formatCurrency(r.entry_price, { currency: currency })}</p>
         </div>
         <div>
           <p className="text-[10px] uppercase tracking-wide text-text-faint">Stop loss</p>
-          <p className="font-mono text-sm font-medium text-sell">{formatCurrency(r.stop_loss)}</p>
+          <p className="font-mono text-sm font-medium text-sell">{formatCurrency(r.stop_loss, { currency: currency })}</p>
           {stopLossPct ? <p className="font-mono text-[11px] text-sell/80">{stopLossPct} if hit</p> : null}
         </div>
         <div>
           <p className="text-[10px] uppercase tracking-wide text-text-faint">Take profit</p>
-          <p className="font-mono text-sm font-medium text-buy">{formatCurrency(r.take_profit)}</p>
+          <p className="font-mono text-sm font-medium text-buy">{formatCurrency(r.take_profit, { currency: currency })}</p>
           {takeProfitPct ? <p className="font-mono text-[11px] text-buy/80">{takeProfitPct} if hit</p> : null}
         </div>
       </div>
