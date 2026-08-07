@@ -13,6 +13,7 @@ import { MacroRegimePanel } from "@/components/analysis/MacroRegimePanel";
 import { AnalysisMemoryPanel } from "@/components/analysis/AnalysisMemoryPanel";
 import { PostMortemPanel } from "@/components/analysis/PostMortemPanel";
 import { VerifierPanel } from "@/components/analysis/VerifierPanel";
+import { formatCurrency } from "@/lib/utils";
 import { AlertCircle, Inbox } from "lucide-react";
 
 /** Full (non-truncated) view of one analyst's signal + reasoning -- used
@@ -216,10 +217,16 @@ function renderStageContent(
           </div>
           <div className="flex gap-4 font-mono text-xs">
             <span className="text-text-faint">
-              Stop-loss <span className="text-sell">{a.risk.stop_loss ?? "—"}</span>
+              Stop-loss{" "}
+              <span className="text-sell">
+                {formatCurrency(a.risk.stop_loss, { currency: a.recommendation?.currency === "BDT" ? "BDT" : "USD" })}
+              </span>
             </span>
             <span className="text-text-faint">
-              Take-profit <span className="text-buy">{a.risk.take_profit ?? "—"}</span>
+              Take-profit{" "}
+              <span className="text-buy">
+                {formatCurrency(a.risk.take_profit, { currency: a.recommendation?.currency === "BDT" ? "BDT" : "USD" })}
+              </span>
             </span>
           </div>
           {a.risk.summary ? (
