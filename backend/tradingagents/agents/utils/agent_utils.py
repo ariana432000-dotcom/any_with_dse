@@ -130,7 +130,27 @@ def build_instrument_context(
     :func:`resolve_instrument_identity`), the company name and business
     classification are injected so agents anchor to the real company rather
     than pattern-matching the price chart to a wrong one (#814).
+
+    🔴 FIXED: confirmed live that every call site in this app's actual
+    pipeline (app/pipeline/agents.py -- Fundamentals/Market/News/Trader/
+    Portfolio Manager, 5 call sites total) invokes this WITHOUT ever
+    passing `identity`, so the "Resolved identity" block below never
+    activates for any ticker, DSE or not -- resolve_instrument_identity()
+    is yfinance-only and wouldn't recognize DSE tickers regardless. Net
+    effect: a DSE ticker got ZERO currency/exchange signal anywhere in any
+    agent's prompt. That's a real gap specifically for DSE tickers (every
+    non-DSE ticker in this app defaults to USD/US markets, which every
+    prompt already implicitly assumes) -- an LLM reasoning about a stock
+    priced at "3.00" with no currency marker may silently assume USD,
+    which at DSE's actual BDT scale is a completely different order of
+    magnitude (e.g. treating a normal BDT bank share price as if it were
+    an unusually cheap US penny stock). Auto-detected here (no network
+    call, no dependency on `identity` being wired up) so it applies
+    regardless of whether identity resolution ever gets fixed elsewhere.
     """
+    from tradingagents.dataflows.symbol_utils import is_dse_ticker
+    is_dse = not is_crypto_hint(asset_type) and is_dse_ticker(ticker)
+
     is_crypto = asset_type == "crypto"
     instrument_label = "asset" if is_crypto else "instrument"
     context = (
@@ -138,6 +158,15 @@ def build_instrument_context(
         "Use this exact ticker in every tool call, report, and recommendation, "
         "preserving any exchange suffix (e.g. `.TO`, `.L`, `.HK`, `.T`, `-USD`)."
     )
+    if is_dse:
+        context += (
+            " This is a Dhaka Stock Exchange (DSE)-listed company. ALL prices, "
+            "market cap, dividends, and financial figures for this instrument "
+            "are in Bangladeshi Taka (BDT / \u09f3), not USD -- do not convert or "
+            "reason about them as if they were US dollar amounts, and do not "
+            "judge the absolute price level by US-stock norms (BDT share "
+            "prices are on a very different numeric scale)."
+        )
 
     details = []
     if identity:
@@ -167,6 +196,14 @@ def build_instrument_context(
             "assume company fundamentals are available."
         )
     return context
+
+
+def is_crypto_hint(asset_type: str) -> bool:
+    """Tiny helper so build_instrument_context's DSE check short-circuits
+    cleanly for crypto assets (is_dse_ticker would just return False for a
+    crypto symbol anyway, but skipping the check/import entirely for the
+    common crypto case avoids an unnecessary bdshare list lookup)."""
+    return asset_type == "crypto"
 
 
 def get_instrument_context_from_state(state: Mapping[str, Any]) -> str:
@@ -212,6 +249,3 @@ def create_msg_delete():
         return {"messages": removal_operations + [placeholder]}
 
     return delete_messages
-
-
-
