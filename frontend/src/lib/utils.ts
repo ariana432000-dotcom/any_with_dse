@@ -5,11 +5,15 @@ export function cn(...inputs: ClassValue[]): string {
   return clsx(inputs);
 }
 
-export function formatCurrency(value: number | null | undefined, opts?: { compact?: boolean }): string {
+export function formatCurrency(
+  value: number | null | undefined,
+  opts?: { compact?: boolean; currency?: "USD" | "BDT" },
+): string {
   if (value === null || value === undefined || Number.isNaN(value)) return "—";
-  return new Intl.NumberFormat("en-US", {
+  const currency = opts?.currency ?? "USD";
+  return new Intl.NumberFormat(currency === "BDT" ? "en-BD" : "en-US", {
     style: "currency",
-    currency: "USD",
+    currency,
     notation: opts?.compact ? "compact" : "standard",
     minimumFractionDigits: opts?.compact ? 0 : 2,
     maximumFractionDigits: opts?.compact ? 1 : 2,
