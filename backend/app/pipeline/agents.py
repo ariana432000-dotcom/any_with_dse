@@ -1110,13 +1110,133 @@ def classify_macro_regime(snapshot: dict) -> str:
     return "NEUTRAL_MACRO"
 
 
+# ✅ CHANGED (per explicit request): VIX/10Y/DXY above are US market
+# indicators -- weak/indirect relevance to Dhaka Stock Exchange-listed
+# companies (a US volatility spike doesn't necessarily say anything about
+# DSE conditions). For DSE tickers, use the DSEX broad index's own trend +
+# realized volatility instead -- the actual market this stock trades in.
+# ✅ Endpoint confirmed via bdshare's own source code and its published
+# PyPI/GitHub docs (not just assumed) -- get_market_info_more_data(start,
+# end, code="DSEX") is the real, parameter-validated function for this
+# (code is checked against {"DSEX","DSES","DS30","DGEN"} internally).
+# Still fails soft (returns {}) rather than raising if the live request
+# itself errors (network, dsebd.org downtime, markup change, etc.), so
+# create_macro_regime_analyst below falls back to the VIX/TNX/DXY snapshot
+# in that case -- check the logs after deploying to confirm which path
+# fired on a real run.
+def fetch_dse_macro_snapshot(as_of_date: str, lookback_days: int = 30) -> dict:
+    """DSEX latest close + lookback-period average, plus realized daily
+    volatility (DSE has no options-implied volatility index like VIX, so
+    this is the closest available proxy for "how choppy is the market
+    right now").
+
+    🔴 FIXED (confirmed via bdshare's own source + PyPI docs, not just
+    guessed): the previous version called market_data._fetch_dse_ohlcv
+    ("DSEX", ...), which wraps bdshare.get_historical_data() -- that
+    function's `code` param is for individual STOCK tickers ("ACI", "GP",
+    ...), not index codes, so passing "DSEX" there was very likely
+    silently returning nothing every time (triggering the fallback path
+    below on every single run, never actually using DSE data). The
+    correct, documented function for historical DSEX values is
+    get_market_info_more_data(start, end, code="DSEX") -- confirmed in
+    bdshare's own source: `code` is validated against exactly
+    {"DSEX","DSES","DS30","DGEN"} and returns a Date + "DSEX Index"
+    dataframe when code="DSEX" is passed."""
+    from datetime import datetime, timedelta
+    from bdshare import get_market_info_more_data
+
+    end_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
+    start_dt = end_dt - timedelta(days=lookback_days)
+    try:
+        df = get_market_info_more_data(
+            start_dt.strftime("%Y-%m-%d"), as_of_date, code="DSEX",
+        )
+    except Exception:  # noqa: BLE001
+        return {}
+    if df is None or df.empty or "DSEX Index" not in df.columns:
+        return {}
+
+    closes = [float(v) for v in df["DSEX Index"].tolist() if v not in (None, "")]
+    if len(closes) < 2:
+        return {}
+
+    latest = closes[-1]
+    avg = sum(closes) / len(closes)
+    changes = [
+        (closes[i] - closes[i - 1]) / closes[i - 1] * 100
+        for i in range(1, len(closes)) if closes[i - 1]
+    ]
+    if changes:
+        mean_chg = sum(changes) / len(changes)
+        variance = sum((c - mean_chg) ** 2 for c in changes) / len(changes)
+        volatility = variance ** 0.5
+    else:
+        volatility = 0.0
+
+    return {
+        "dsex": {"latest": round(latest, 2), "avg": round(avg, 2)},
+        "dsex_volatility_pct": round(volatility, 2),
+    }
+
+
+def classify_dse_macro_regime(snapshot: dict) -> str:
+    """Rule-based DSE-market regime tag from DSEX trend + realized
+    volatility. Reuses the same tag vocabulary as classify_macro_regime
+    (RISK_OFF_HIGH_VOL / RISK_ON_LOW_VOL / NEUTRAL_MACRO) so downstream
+    code (regime-transition reflection, episode metadata) doesn't need a
+    second tag set to handle -- RATES_RISING/RATES_FALLING are simply
+    never emitted here since there's no comparable BD bond-yield signal
+    wired in yet."""
+    dsex = snapshot.get("dsex") or {}
+    latest, avg = dsex.get("latest"), dsex.get("avg")
+    vol = snapshot.get("dsex_volatility_pct")
+
+    if vol is not None and vol >= 1.5:
+        return "RISK_OFF_HIGH_VOL"
+    if latest is not None and avg is not None and avg != 0 and (vol is None or vol < 1.0):
+        if latest > avg * 1.02:
+            return "RISK_ON_LOW_VOL"
+    return "NEUTRAL_MACRO"
+
+
 def create_macro_regime_analyst(llm, log=print):
     from langchain_core.messages import HumanMessage, SystemMessage
+    from tradingagents.dataflows.symbol_utils import is_dse_ticker
     U = _ta_utils()
 
     def node(state):
         current_date = state["trade_date"]
+        company = state.get("company_of_interest", "")
         log(f"Fetching macro snapshot for {current_date}")
+
+        if is_dse_ticker(company):
+            snapshot = fetch_dse_macro_snapshot(current_date)
+            if snapshot:
+                macro_regime = classify_dse_macro_regime(snapshot)
+                log(f"DSEX={snapshot.get('dsex')} volatility={snapshot.get('dsex_volatility_pct')}%")
+                log(f"macro regime (DSE): {macro_regime}")
+
+                prompt = f"""You are a macro strategist covering the Dhaka Stock Exchange. Today is {current_date}.
+Using the REAL data below, write a brief (3-4 sentence) macro market regime report
+for the DSE broad market. Classify whether conditions are risk-on or risk-off and
+what this implies for equity positioning on DSE-listed names.
+
+=== DSE MACRO SNAPSHOT ===
+DSEX Index:          latest={snapshot.get('dsex', {}).get('latest')}, 30d avg={snapshot.get('dsex', {}).get('avg')}
+Realized volatility: {snapshot.get('dsex_volatility_pct')}% (daily, over the lookback window)
+
+Rule-based macro regime tag: {macro_regime}
+""" + U["get_language_instruction"]()
+
+                messages = [
+                    SystemMessage(content="You are a senior DSE market strategist. Base your report only on the data given."),
+                    HumanMessage(content=prompt),
+                ]
+                report = invoke_llm_with_retry(llm, messages).content
+                log("macro regime report ready (DSE)")
+                return {"macro_report": report, "macro_regime": macro_regime, "macro_snapshot": snapshot}
+
+            log("DSEX fetch failed/empty -- falling back to US VIX/10Y/DXY snapshot")
 
         snapshot = fetch_macro_snapshot(current_date)
         macro_regime = classify_macro_regime(snapshot)
