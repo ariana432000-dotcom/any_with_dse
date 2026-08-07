@@ -501,6 +501,8 @@ class Orchestrator:
 
         entry = state.market.latest_close if state.market else None
         risk = state.risk or RiskState()
+        from tradingagents.dataflows.symbol_utils import is_dse_ticker
+        currency = "BDT" if is_dse_ticker(state.ticker) else "USD"
         rec = RecommendationState(
             signal=signal, confidence=confidence, entry_price=entry,
             stop_loss=risk.stop_loss, take_profit=risk.take_profit,
@@ -510,6 +512,7 @@ class Orchestrator:
             reasoning=_extract_executive_summary(pm_text) or "Synthesized from analyst consensus.",
             summary=f"{signal.value} {state.ticker} · confidence {confidence:.0%} "
                     f"· regime {state.memory.regime if state.memory else 'N/A'}{override_note}",
+            currency=currency,
         )
         return rec
 
