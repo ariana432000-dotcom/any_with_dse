@@ -123,6 +123,12 @@ class MacroState(BaseModel):
     tnx_avg: float | None = None
     dxy: float | None = None
     dxy_avg: float | None = None
+    # DSE tickers use the DSEX broad index + its realized volatility instead
+    # of VIX/10Y/DXY (see fetch_dse_macro_snapshot) -- populated instead of
+    # the fields above when that path fires, left None otherwise.
+    dsex: float | None = None
+    dsex_avg: float | None = None
+    dsex_volatility_pct: float | None = None
 
 
 class PostMortemState(BaseModel):
