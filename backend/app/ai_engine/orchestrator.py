@@ -444,11 +444,19 @@ class Orchestrator:
                 except (TypeError, ValueError):
                     return None
 
+            def _f2(key):
+                try:
+                    return float(snap.get(key))
+                except (TypeError, ValueError):
+                    return None
+
             state.macro = MacroState(
                 regime=meta.get("macro_regime", ""), report=text[:2000],
                 vix=_f("vix", "latest"), vix_avg=_f("vix", "avg"),
                 tnx=_f("tnx", "latest"), tnx_avg=_f("tnx", "avg"),
                 dxy=_f("dxy", "latest"), dxy_avg=_f("dxy", "avg"),
+                dsex=_f("dsex", "latest"), dsex_avg=_f("dsex", "avg"),
+                dsex_volatility_pct=_f2("dsex_volatility_pct"),
             )
         elif stage == "post_mortem":
             state.post_mortem = PostMortemState(
