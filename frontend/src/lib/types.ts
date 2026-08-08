@@ -117,6 +117,12 @@ export interface MacroState {
   tnx_avg: number | null;
   dxy: number | null;
   dxy_avg: number | null;
+  // Populated instead of vix/tnx/dxy for DSE tickers (see backend
+  // fetch_dse_macro_snapshot) -- the DSEX broad index + its realized
+  // volatility, since VIX/10Y/DXY are US indicators.
+  dsex: number | null;
+  dsex_avg: number | null;
+  dsex_volatility_pct: number | null;
 }
 
 export interface PostMortemState {
