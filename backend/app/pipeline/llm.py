@@ -9,6 +9,7 @@ Providers
   ollama                 local, free            RAEM_LLM_MODEL=qwen2.5:7b, OLLAMA_BASE_URL
   openai                cloud                  OPENAI_API_KEY (+ optional OPENAI_BASE_URL, RAEM_LLM_MODEL)
   groq                  cloud, fast/cheap      GROQ_API_KEY   (RAEM_LLM_MODEL=llama-3.3-70b-versatile)
+  kimi                  cloud (Moonshot AI)    MOONSHOT_API_KEY (RAEM_LLM_MODEL=kimi-k3, default)
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ def _provider() -> str:
         return "openai"
     if os.environ.get("GROQ_API_KEY"):
         return "groq"
+    if os.environ.get("MOONSHOT_API_KEY"):
+        return "kimi"
     return "ollama"
 
 
@@ -60,7 +63,12 @@ def make_llm(temperature=None):
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
         return ChatAnthropic(model=os.environ.get("RAEM_LLM_MODEL", "claude-sonnet-5"),
-                             api_key=os.environ["ANTHROPIC_API_KEY"]) #Ari
+                             api_key=os.environ["ANTHROPIC_API_KEY"])
+    if provider == "kimi":
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(model=os.environ.get("RAEM_LLM_MODEL", "kimi-k3"),
+                          api_key=os.environ["MOONSHOT_API_KEY"],
+                          base_url="https://api.moonshot.ai/v1", temperature=temp)
 
     raise ValueError(f"Unknown RAEM_LLM_PROVIDER: {provider}")
 #Ari-----
@@ -114,7 +122,9 @@ def llm_info() -> dict:
         "groq": os.environ.get("RAEM_LLM_MODEL", "llama-3.3-70b-versatile"),
         "openai": os.environ.get("RAEM_LLM_MODEL", "gpt-4o-mini"),
         "anthropic": os.environ.get("RAEM_LLM_MODEL", "claude-sonnet-5"),
+        "kimi": os.environ.get("RAEM_LLM_MODEL", "kimi-k3"),
     }.get(provider, config.LLM_MODEL)
-    key_ok = provider == "ollama" or bool(os.environ.get(f"{provider.upper()}_API_KEY"))
+    key_env = "MOONSHOT_API_KEY" if provider == "kimi" else f"{provider.upper()}_API_KEY"
+    key_ok = provider == "ollama" or bool(os.environ.get(key_env))
     return {"provider": provider, "model": model, "configured": key_ok,
             "detail": ("local" if provider == "ollama" else ("API key set" if key_ok else "API key missing"))}
