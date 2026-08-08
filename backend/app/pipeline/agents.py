@@ -14,6 +14,48 @@ import time
 from .llm import invoke_llm_with_retry
 
 
+# ==========================================================================
+# Confidence heuristics — every analyst node below previously returned no
+# confidence figure at all, so runner.py's stage "meta" never carried a
+# "confidence" key and every agent card in the UI showed a hardcoded 0%
+# (not a real "the model is uncertain" reading -- just a missing field).
+# These are deliberately simple, data-completeness-based scores (how much
+# of the real underlying data actually came back non-empty/non-error) --
+# an honest "how much did I actually have to work with" signal, not a
+# model-reported certainty, so it stays consistent across LLM providers.
+# ==========================================================================
+def _field_completeness_confidence(fields: dict, floor: float = 0.05, cap: float = 0.95) -> float:
+    """Fraction of `fields` that hold a real (non-missing, non-error)
+    value. Used for fundamentals/market, where each field is one metric
+    or indicator that's either a real number/string or an "N/A"/"Error"
+    placeholder."""
+    fields = {k: v for k, v in fields.items() if not str(k).startswith("_")}
+    if not fields:
+        return 0.0
+    good = 0
+    for v in fields.values():
+        if v is None:
+            continue
+        s = str(v).strip()
+        if not s or s.upper() in {"N/A", "NA", "NONE", "NULL"} or s.lower().startswith("error"):
+            continue
+        good += 1
+    if good == 0:
+        return 0.0
+    return round(min(max(good / len(fields), floor), cap), 2)
+
+
+def _text_confidence(text: str, target_chars: int, weight: float = 1.0) -> float:
+    """Confidence contribution from one block of fetched text: 0 if it's
+    an error placeholder or empty, otherwise scales up to `weight` as the
+    block approaches `target_chars` (a rough "did we get a substantive
+    amount of real content" proxy)."""
+    text = (text or "").strip()
+    if not text or text.lower().startswith("error"):
+        return 0.0
+    return weight * min(1.0, len(text) / max(target_chars, 1))
+
+
 def extract_final_proposal(report_text: str) -> str:
     """Pulls the FINAL TRANSACTION PROPOSAL verdict out of a report so it
     survives truncation elsewhere (reports get sliced to a few hundred chars
@@ -86,27 +128,6 @@ def _ta_utils(ticker: str = ""):
         "get_news": get_news,
         "get_global_news": get_global_news,
     }
-
-
-def _sentiment_tools():
-    """✅ CHANGED: Finnhub-based get_stock_news_sentiment (from
-    .data_providers) is now the primary source, tried first. Reddit/
-    StockTwits sources from tradingagents (real, working dataflows in this
-    vendored copy — not a black box) are kept as additional signal if
-    available; each is independently optional."""
-    tools = {}
-    from .data_providers import get_stock_news_sentiment
-    tools["get_stock_news_sentiment"] = get_stock_news_sentiment
-
-    names = ["get_reddit_news", "get_reddit_global_news", "get_news_sentiment"]
-    for n in names:
-        try:
-            mod = __import__("tradingagents.agents.utils.agent_utils",
-                             fromlist=[n])
-            tools[n] = getattr(mod, n)
-        except (ImportError, AttributeError):
-            pass
-    return tools
 
 
 # ==========================================================================
@@ -475,10 +496,12 @@ RULES:
         #     Market Capitalization lines -> the fetch worked fine and the
         #     issue is elsewhere (label wording g_dse doesn't recognize)
         # Remove this key once the real cause is confirmed and fixed.
+        fund_confidence = _field_completeness_confidence(fund_metrics)
         fund_metrics["_debug_raw_fundamentals"] = str(fund)[:250]
         if _is_dse:
             fund_metrics["_debug_raw_balance_sheet"] = str(bs)[:250]
-        return {"fundamentals_report": report, "fund_metrics": fund_metrics}
+        return {"fundamentals_report": report, "fund_metrics": fund_metrics,
+                "fundamentals_confidence": fund_confidence}
 
     return node
 
@@ -561,6 +584,7 @@ At the very end, output a Markdown table with EXACTLY these columns:
             "market_report": report,
             "indicators_parsed": indicators_dict,
             "market_raw_data": {"stock_data": stock_data, "indicators": indicators_dict},
+            "market_confidence": _field_completeness_confidence(indicators_dict),
         }
 
     return node
@@ -632,53 +656,74 @@ At the very end, output a Markdown table with EXACTLY these 5 columns:
             "overall_sentiment": overall,
             "company_news_chars": len(company_news), "global_news_chars": len(global_news),
         }
+        # Company news carries most of the weight -- it's what the report is
+        # actually about; global news is background context.
+        news_confidence = round(min(0.95,
+            _text_confidence(company_news, target_chars=1200, weight=0.75)
+            + _text_confidence(global_news, target_chars=800, weight=0.25)), 2)
         return {
             "news_report": report, "news_metrics": news_metrics,
             "news_table_md": tbl_m.group(1) if tbl_m else "",
             "news_raw": {"company_news": company_news, "global_news": global_news},
+            "news_confidence": news_confidence,
         }
 
     return node
 
 
 def create_sentiment_analyst(llm, log=print):
-    from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+    """Runs right after the News Analyst in the pipeline (see runner.py), so
+    state["news_metrics"] / state["news_table_md"] are already populated
+    with real, per-headline POSITIVE/NEGATIVE/NEUTRAL tags -- for DSE
+    tickers, sourced from dsebd.org corporate disclosures + sharenews24.com
+    market news (see dse_news.py); for everything else, Yahoo Finance.
+
+    This is now the primary sentiment signal. StockTwits/Reddit have zero
+    DSE coverage, and Finnhub's /news-sentiment endpoint needs a paid plan
+    and doesn't cover DSE names either way -- so rather than call dead/
+    always-empty tools and fall back to "no data", this reuses the News
+    Analyst's own structured breakdown directly. It's honestly framed as
+    news-flow sentiment (what's being reported), not measured market
+    sentiment (price/volume-derived crowd positioning) -- the Data Source
+    Review section below says so explicitly."""
+    from langchain_core.messages import HumanMessage, SystemMessage
     U = _ta_utils()
-    tools = _sentiment_tools()
 
     def node(state):
         current_date = state["trade_date"]
         company = state["company_of_interest"]
         log(f"Fetching sentiment for {company} on {current_date}")
 
-        sentiment_data = {}
-        arg_patterns = [
-            {"ticker": company, "curr_date": current_date},
-            {"symbol": company, "curr_date": current_date},
-            {"ticker": company, "start_date": current_date},
-        ]
-        for tool_name, tool_fn in tools.items():
-            log(f"calling {tool_name}")
-            got = False
-            for args in arg_patterns:
-                try:
-                    sentiment_data[tool_name] = str(tool_fn.invoke(args))[:2000]
-                    got = True
-                    break
-                except Exception:  # noqa: BLE001
-                    continue
-            if not got:
-                sentiment_data[tool_name] = "No data available"
+        news_metrics = state.get("news_metrics", {}) or {}
+        news_table = str(state.get("news_table_md", "") or "").strip()
+        news_report = str(state.get("news_report", ""))[:1500]
 
-        news_context = str(state.get("news_report", ""))[:1000]
-        data_sections = ""
-        for tool_name, data in sentiment_data.items():
-            data_sections += f"\n=== {tool_name.upper()} ===\n{data}\n"
-        if not data_sections.strip() or all(v == "No data available" for v in sentiment_data.values()):
-            data_sections = "No direct sentiment API data available. Use news report for inference."
+        if news_table:
+            log(f"using News Analyst's headline table: "
+                f"{news_metrics.get('positive_count', 0)} positive / "
+                f"{news_metrics.get('negative_count', 0)} negative / "
+                f"{news_metrics.get('neutral_count', 0)} neutral")
+            data_sections = f"""Positive headlines: {news_metrics.get("positive_count", 0)}
+Negative headlines: {news_metrics.get("negative_count", 0)}
+Neutral headlines:  {news_metrics.get("neutral_count", 0)}
+News Analyst's overall read: {news_metrics.get("overall_sentiment", "N/A")}
+
+Per-headline breakdown (tagged moments ago by the News Analyst from real scraped articles):
+{news_table}"""
+        else:
+            log("no news headline table available -- falling back to narrative inference")
+            data_sections = "No structured news-sentiment breakdown available. Infer from the news report narrative below."
 
         prompt = f"""You are a sentiment analyst. Today is {current_date}.
 IMPORTANT: Base your analysis ONLY on the data below. Do NOT invent scores.
+
+No social-sentiment API (StockTwits, Reddit, Finnhub) has usable coverage for {company} --
+StockTwits/Reddit carry essentially no DSE-listed discussion, and Finnhub's sentiment
+endpoint requires a paid plan and doesn't cover DSE names anyway. Your sole grounded input
+is therefore the News Analyst's per-headline sentiment breakdown below. This reflects
+news-flow sentiment (what's being reported about the company), not measured market
+sentiment (price/volume-derived crowd positioning) -- state this distinction explicitly
+in your Data Source Review.
 
 Analyze market sentiment for {company}.
 Sections: Data Source Review -> Score Breakdown -> Key Signals -> Confidence Assessment
@@ -686,11 +731,11 @@ Sections: Data Source Review -> Score Breakdown -> Key Signals -> Confidence Ass
 At the very end, output a Markdown table with EXACTLY these columns:
 | Source | Sentiment | Score (1-10) | Confidence | Key Signal |
 
-=== SENTIMENT DATA ===
+=== NEWS-FLOW SENTIMENT (from News Analyst) ===
 {data_sections}
 
-=== NEWS CONTEXT ===
-{news_context}
+=== NEWS REPORT NARRATIVE ===
+{news_report}
 """ + U["get_language_instruction"]()
 
         messages = [
@@ -708,7 +753,20 @@ At the very end, output a Markdown table with EXACTLY these columns:
             "confidence": conf_m.group(1) if conf_m else "N/A",
             "overall": overall_m.group(1).upper() if overall_m else "NEUTRAL",
         }
-        return {"sentiment_report": report, "sentiment_metrics": sentiment_metrics}
+        # Numeric confidence (used by the agent-card UI, separate from the
+        # High/Medium/Low label above): starts from whether a real
+        # structured headline breakdown was available at all, then nudged
+        # by the LLM's own stated confidence label if it gave one.
+        n_tagged = (news_metrics.get("positive_count", 0) + news_metrics.get("negative_count", 0)
+                    + news_metrics.get("neutral_count", 0))
+        base = 0.65 if news_table else 0.2
+        if news_table:
+            base = min(0.9, base + 0.03 * min(n_tagged, 8))
+        label = (conf_m.group(1).lower() if conf_m else "")
+        nudge = {"high": 0.15, "medium": 0.0, "low": -0.2}.get(label, 0.0)
+        sentiment_confidence = round(min(max(base + nudge, 0.05), 0.95), 2)
+        return {"sentiment_report": report, "sentiment_metrics": sentiment_metrics,
+                "sentiment_confidence": sentiment_confidence}
 
     return node
 
