@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import statistics
 from datetime import datetime, timezone
 
 from app.ai_engine.events import EventEmitter, EventType, progress_for
@@ -43,6 +44,7 @@ from app.ai_engine.state import (
     PipelineStep,
     PortfolioState,
     PostMortemState,
+    PriceOutlookState,
     RecommendationState,
     RiskState,
     Signal,
@@ -407,11 +409,15 @@ class Orchestrator:
     def _absorb_stage(self, state: ExecutionState, stage: str, html: str, meta: dict) -> None:
         text = _strip_html(html)
         if stage == "risk_facilitator":
+            # Real current price, if known yet (Market Analyst runs long
+            # before this stage) -- used to sanity-check the extracted
+            # stop-loss/take-profit against, see _extract_price.
+            ref_price = state.market.latest_close if state.market else None
             state.risk = RiskState(
                 rating=_extract(text, r"(LOW|MEDIUM|HIGH)\s*(?:risk)?", "MEDIUM"),
                 position_sizing=_extract(text, r"(\d{1,3}\s*%)", ""),
-                stop_loss=_extract_price(text, r"stop[- ]?loss"),
-                take_profit=_extract_price(text, r"take[- ]?profit"),
+                stop_loss=_extract_price(text, r"stop[- ]?loss", reference_price=ref_price),
+                take_profit=_extract_price(text, r"take[- ]?profit", reference_price=ref_price),
                 summary=text[:800],
             )
         elif stage == "investment_facilitator":
@@ -511,6 +517,9 @@ class Orchestrator:
         risk = state.risk or RiskState()
         from tradingagents.dataflows.symbol_utils import is_dse_ticker
         currency = "BDT" if is_dse_ticker(state.ticker) else "USD"
+        outlook = _compute_price_outlook(
+            state.market.rows if state.market else None, entry, days=3,
+        )
         rec = RecommendationState(
             signal=signal, confidence=confidence, entry_price=entry,
             stop_loss=risk.stop_loss, take_profit=risk.take_profit,
@@ -521,6 +530,7 @@ class Orchestrator:
             summary=f"{signal.value} {state.ticker} · confidence {confidence:.0%} "
                     f"· regime {state.memory.regime if state.memory else 'N/A'}{override_note}",
             currency=currency,
+            outlook_3d=outlook,
         )
         return rec
 
@@ -577,6 +587,44 @@ def _extract(text: str, pattern: str, default: str = "") -> str:
     return m.group(1).upper() if m else default
 
 
+def _compute_price_outlook(rows: list[dict] | None, entry: float | None,
+                            days: int = 3, min_closes: int = 15) -> PriceOutlookState | None:
+    """A trailing-volatility-implied +/- range for the next `days` trading
+    sessions -- e.g. "if this stock's recent day-to-day movement continues
+    at the same pace, a 3-day move of roughly this size wouldn't be
+    unusual." Derived purely from the ticker's own recent closes (a
+    classic realized-volatility / options-style "expected move" calc, NOT
+    a forecast model -- it says nothing about direction, only plausible
+    magnitude). Needs at least `min_closes` real closing prices to bother
+    -- with too little history the estimate is noise, so this returns
+    None rather than a misleadingly precise-looking range."""
+    if not entry or entry <= 0 or not rows:
+        return None
+    closes = [r.get("close") for r in rows
+              if isinstance(r.get("close"), (int, float)) and r.get("close")]
+    if len(closes) < min_closes:
+        return None
+    returns = [
+        (closes[i] - closes[i - 1]) / closes[i - 1]
+        for i in range(1, len(closes)) if closes[i - 1]
+    ]
+    if len(returns) < min_closes - 1:
+        return None
+    daily_vol = statistics.pstdev(returns)
+    if daily_vol <= 0:
+        return None
+    horizon_vol = daily_vol * (days ** 0.5)  # random-walk scaling: sigma * sqrt(t)
+    move = entry * horizon_vol
+    return PriceOutlookState(
+        days=days,
+        low=round(entry - move, 2),
+        high=round(entry + move, 2),
+        daily_volatility_pct=round(daily_vol * 100, 2),
+        basis=f"±1 std-dev range from {len(returns)}-day realized volatility "
+              "(not a price forecast)",
+    )
+
+
 def _extract_executive_summary(pm_text: str) -> str:
     """✅ CHANGED (per explicit request): the Recommendation panel's "Why
     X" section was showing pm_text[:2000] -- render_pm_decision()'s FULL
@@ -595,7 +643,15 @@ def _extract_executive_summary(pm_text: str) -> str:
     return (pm_text or "").strip()[:400]
 
 
-def _extract_price(text: str, label_pattern: str) -> float | None:
+_NO_TARGET_RE = re.compile(
+    r"^\s*[:\-–—]?\s*(n/?a\b|not\s+(?:applicable|set|specified|available)\b|"
+    r"no\s+(?:specific\s+)?target\b|none\b)",
+    re.IGNORECASE,
+)
+
+
+def _extract_price(text: str, label_pattern: str, reference_price: float | None = None,
+                    max_deviation: float = 0.6) -> float | None:
     """🔴 FIXED: RiskState's stop_loss/take_profit were never populated at
     all -- _absorb_stage only ever set rating/position_sizing/summary from
     the risk facilitator's text, so these fields stayed None forever
@@ -605,17 +661,40 @@ def _extract_price(text: str, label_pattern: str) -> float | None:
     ("stop-loss", "take-profit") in that free-form text, tolerating
     connectors ("at", "around", "of"), a $/Tk currency prefix, and commas
     in the number -- same style as _extract_cited_number in agents.py's
-    decision verifier."""
-    m = re.search(
-        rf"{label_pattern}\b[^0-9\-]{{0,25}}[\$৳]?\s*(?:Tk\.?\s*)?(-?[\d,]+\.?\d*)",
-        text or "", re.IGNORECASE,
-    )
-    if not m:
-        return None
-    try:
-        return float(m.group(1).replace(",", ""))
-    except ValueError:
-        return None
+    decision verifier.
+
+    🔴 FIXED (second pass): the naive "first digit within 25 chars of the
+    label" version above grabbed the wrong number whenever the facilitator
+    didn't set a real target -- most often on a HOLD call, where the text
+    reads something like "Take-profit: not applicable (see point 1
+    above)" -- the "1" a few words later got parsed as a Tk 1.00 target,
+    shown next to a ~Tk 30 entry price as "-96.7% if hit". Two independent
+    guards now apply: (1) if "N/A"/"not applicable"/"no target" etc.
+    appears immediately after the label, stop there rather than continuing
+    to scan for a stray digit further into the sentence; (2) if a
+    reference_price (the real entry price) is given, any extracted number
+    more than `max_deviation` away from it is rejected as implausible for
+    a 1-4 week swing target and the search keeps looking at the label's
+    other occurrences, if any, instead of returning it."""
+    text = text or ""
+    for m in re.finditer(rf"{label_pattern}\b", text, re.IGNORECASE):
+        window = text[m.end(): m.end() + 60]
+        if _NO_TARGET_RE.search(window):
+            continue
+        num_m = re.search(
+            r"^[^0-9\-]{0,25}[\$৳]?\s*(?:Tk\.?\s*)?(-?[\d,]+\.?\d*)", window,
+        )
+        if not num_m:
+            continue
+        try:
+            price = float(num_m.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        if reference_price and reference_price > 0:
+            if abs(price - reference_price) / reference_price > max_deviation:
+                continue
+        return price
+    return None
 
 
 def _side_case(state: ExecutionState, side: str) -> str:
