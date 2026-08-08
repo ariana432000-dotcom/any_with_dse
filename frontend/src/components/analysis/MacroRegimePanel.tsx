@@ -25,11 +25,16 @@ export function MacroRegimePanel({ macro }: { macro: MacroState | null }) {
   if (!macro || !macro.report) {
     return (
       <Card>
-        <CardHeader title="Macro Regime" subtitle="Market-wide risk backdrop (VIX · 10Y yield · DXY)." />
+        <CardHeader title="Macro Regime" subtitle="Market-wide risk backdrop." />
         <EmptyState icon={<Globe2 className="size-5" />} title="Not assessed yet" />
       </Card>
     );
   }
+
+  // DSE tickers use the DSEX broad index + its realized volatility instead
+  // of VIX/10Y/DXY (US indicators have weak/indirect relevance to Dhaka
+  // Stock Exchange conditions) -- see backend fetch_dse_macro_snapshot.
+  const isDse = macro.dsex !== null;
 
   return (
     <Card>
@@ -42,11 +47,18 @@ export function MacroRegimePanel({ macro }: { macro: MacroState | null }) {
           </Badge>
         }
       />
-      <div className="grid grid-cols-3 gap-3 border-b border-border-soft pb-4">
-        <MacroStat label="VIX" value={macro.vix} avg={macro.vix_avg} />
-        <MacroStat label="10Y Yield" value={macro.tnx} avg={macro.tnx_avg} suffix="%" />
-        <MacroStat label="Dollar Index" value={macro.dxy} avg={macro.dxy_avg} />
-      </div>
+      {isDse ? (
+        <div className="grid grid-cols-2 gap-3 border-b border-border-soft pb-4">
+          <MacroStat label="DSEX Index" value={macro.dsex} avg={macro.dsex_avg} />
+          <MacroStat label="Realized Volatility" value={macro.dsex_volatility_pct} suffix="%" avg={null} />
+        </div>
+      ) : (
+        <div className="grid grid-cols-3 gap-3 border-b border-border-soft pb-4">
+          <MacroStat label="VIX" value={macro.vix} avg={macro.vix_avg} />
+          <MacroStat label="10Y Yield" value={macro.tnx} avg={macro.tnx_avg} suffix="%" />
+          <MacroStat label="Dollar Index" value={macro.dxy} avg={macro.dxy_avg} />
+        </div>
+      )}
       <p className="mt-4 text-xs leading-relaxed text-text-muted">{macro.report}</p>
     </Card>
   );
@@ -69,9 +81,11 @@ function MacroStat({
       <p className="font-mono text-sm font-medium text-text">
         {value !== null ? `${formatNumber(value)}${suffix}` : "—"}
       </p>
-      <p className="font-mono text-[10px] text-text-faint">
-        30d avg {avg !== null ? `${formatNumber(avg)}${suffix}` : "—"}
-      </p>
+      {avg !== null ? (
+        <p className="font-mono text-[10px] text-text-faint">30d avg {formatNumber(avg)}{suffix}</p>
+      ) : (
+        <p className="font-mono text-[10px] text-text-faint">&nbsp;</p>
+      )}
     </div>
   );
 }
