@@ -138,6 +138,14 @@ export interface VerifierState {
   auto_overridden: boolean;
 }
 
+export interface PriceOutlookState {
+  days: number;
+  low: number | null;
+  high: number | null;
+  daily_volatility_pct: number | null;
+  basis: string;
+}
+
 export interface RecommendationState {
   signal: Signal;
   confidence: number;
@@ -150,6 +158,7 @@ export interface RecommendationState {
   reasoning: string;
   summary: string;
   currency: string;
+  outlook_3d: PriceOutlookState | null;
 }
 
 export interface ExecutionMetadata {
