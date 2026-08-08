@@ -150,6 +150,21 @@ class VerifierState(BaseModel):
     auto_overridden: bool = False
 
 
+class PriceOutlookState(BaseModel):
+    """A statistical price range for a short holding period, derived purely
+    from this ticker's own trailing realized volatility -- e.g. "based on
+    how much this stock has typically moved day-to-day recently, a 3-day
+    move within roughly this +/- range wouldn't be unusual." This is NOT a
+    price prediction or forecast -- it carries no view on direction, just
+    a plausible magnitude of movement, so it's shown alongside an explicit
+    disclaimer on the frontend."""
+    days: int = 3
+    low: float | None = None
+    high: float | None = None
+    daily_volatility_pct: float | None = None
+    basis: str = ""
+
+
 class RecommendationState(BaseModel):
     signal: Signal = Signal.NA
     confidence: float = 0.0
@@ -161,6 +176,7 @@ class RecommendationState(BaseModel):
     bear_case: str = ""
     reasoning: str = ""
     summary: str = ""
+    outlook_3d: PriceOutlookState | None = None
     # 🔴 FIXED: entry_price/stop_loss/take_profit were always rendered with
     # a hardcoded "$" (USD) prefix on the frontend (formatCurrency's
     # currency: "USD" was never conditional) -- for a DSE ticker these are
