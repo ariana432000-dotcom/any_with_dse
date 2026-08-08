@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import type { AnalysisResponse, AgentView, PipelineStep } from "@/lib/types";
-import { STAGE_META, STAGE_GROUPS } from "@/lib/pipelineStages";
+import { STAGE_META } from "@/lib/pipelineStages";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Tabs } from "@/components/ui/Tabs";
 import { Badge, SignalBadge } from "@/components/ui/Badge";
@@ -110,24 +110,12 @@ export function StageTabs({ analysis }: { analysis: AnalysisResponse }) {
       <Card padded={false} className="overflow-hidden">
         <div className="px-5 py-4">
           <h2 className="mb-3 text-sm font-semibold text-text">Agent stages</h2>
-          <div className="space-y-2.5">
-            {STAGE_GROUPS.map((group) => {
-              const stages = STAGE_META.filter((s) => s.group === group.id);
-              if (!stages.length) return null;
-              return (
-                <div key={group.id}>
-                  <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-text-faint">
-                    {group.label}
-                  </p>
-                  <Tabs
-                    items={stages.map((s) => ({ id: s.id, label: s.label, done: byStage.has(s.id) }))}
-                    active={active}
-                    onChange={setActive}
-                  />
-                </div>
-              );
-            })}
-          </div>
+          <Tabs
+            items={STAGE_META.map((s) => ({ id: s.id, label: s.label, done: byStage.has(s.id) }))}
+            active={active}
+            onChange={setActive}
+            variant="numbered"
+          />
         </div>
       </Card>
 
