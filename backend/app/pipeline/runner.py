@@ -137,7 +137,8 @@ class PipelineRunner:
                               {"metrics": out.get("fund_metrics", {}), "report": out.get("fundamentals_report", "")})
         yield {"type": "stage_done", "stage": "fundamentals",
                "html": md_to_html(out["fundamentals_report"]),
-               "meta": {"metrics": out.get("fund_metrics", {})},
+               "meta": {"metrics": out.get("fund_metrics", {}),
+                        "confidence": out.get("fundamentals_confidence", 0.0)},
                "input": fundamentals_input}
 
         # -- market --
@@ -159,7 +160,8 @@ class PipelineRunner:
                                "report": out.get("market_report", "")})
         yield {"type": "stage_done", "stage": "market",
                "html": md_to_html(out["market_report"]),
-               "meta": {"indicators": indicators, "regime": mem.classify_regime(indicators)},
+               "meta": {"indicators": indicators, "regime": mem.classify_regime(indicators),
+                        "confidence": out.get("market_confidence", 0.0)},
                "input": market_input}
 
         # -- news (+ RAG ingest) --
@@ -184,7 +186,8 @@ class PipelineRunner:
                               {"news_metrics": out.get("news_metrics", {}), "report": out.get("news_report", "")})
         yield {"type": "stage_done", "stage": "news",
                "html": md_to_html(out["news_report"]),
-               "meta": {"news_metrics": out.get("news_metrics", {})},
+               "meta": {"news_metrics": out.get("news_metrics", {}),
+                        "confidence": out.get("news_confidence", 0.0)},
                "input": news_input}
 
         # -- sentiment --
@@ -193,7 +196,7 @@ class PipelineRunner:
         logs = []
         node = agents.create_sentiment_analyst(llm, log=logs.append)
         sentiment_input = {"company": self.company, "date": self.trade_date,
-                            "tools_available": "social_sentiment, analyst_ratings"}
+                            "source": "News Analyst's per-headline sentiment table"}
         out = node(self.state)
         self.state.update(out)
         for ln in logs:
@@ -202,7 +205,8 @@ class PipelineRunner:
                               {"sentiment_metrics": out.get("sentiment_metrics", {}), "report": out.get("sentiment_report", "")})
         yield {"type": "stage_done", "stage": "sentiment",
                "html": md_to_html(out["sentiment_report"]),
-               "meta": {"sentiment_metrics": out.get("sentiment_metrics", {})},
+               "meta": {"sentiment_metrics": out.get("sentiment_metrics", {}),
+                        "confidence": out.get("sentiment_confidence", 0.0)},
                "input": sentiment_input}
 
         # -- macro regime (market-wide risk regime, independent of the stock-specific regime) --
@@ -496,7 +500,7 @@ class PipelineRunner:
         return d.get(stage, {})
 
     def _run_demo(self):
-        from . import demo
+        from . import demo, agents
         idx = 0
         indicators = demo.INDICATORS
         for stage, _label in STAGES:
@@ -513,25 +517,28 @@ class PipelineRunner:
                     yield {"type": "log", "stage": stage, "line": ln}; time.sleep(0.15)
                 self.session.log_step("Fundamentals Analyst", stage_input, {"metrics": demo.FUND_METRICS, "report": demo.FUNDAMENTALS})
                 yield {"type": "stage_done", "stage": stage, "html": md_to_html(demo.FUNDAMENTALS),
-                       "meta": {"metrics": demo.FUND_METRICS}, "input": stage_input}
+                       "meta": {"metrics": demo.FUND_METRICS,
+                                "confidence": agents._field_completeness_confidence(demo.FUND_METRICS)},
+                       "input": stage_input}
             elif stage == "market":
                 for ln in demo.MARKET_LOGS:
                     yield {"type": "log", "stage": stage, "line": ln}; time.sleep(0.12)
                 self.session.log_step("Market Analyst", stage_input, {"indicators": indicators,
                                       "stock_data": demo.STOCK_CSV, "report": demo.MARKET})
                 yield {"type": "stage_done", "stage": stage, "html": md_to_html(demo.MARKET),
-                       "meta": {"indicators": indicators, "regime": mem.classify_regime(indicators)},
+                       "meta": {"indicators": indicators, "regime": mem.classify_regime(indicators),
+                                "confidence": agents._field_completeness_confidence(indicators)},
                        "input": stage_input}
             elif stage == "news":
                 for ln in demo.NEWS_LOGS:
                     yield {"type": "log", "stage": stage, "line": ln}; time.sleep(0.12)
                 self.session.log_step("News Analyst", stage_input, {"news_metrics": demo.NEWS_METRICS, "report": demo.NEWS})
                 yield {"type": "stage_done", "stage": stage, "html": md_to_html(demo.NEWS),
-                       "meta": {"news_metrics": demo.NEWS_METRICS}, "input": stage_input}
+                       "meta": {"news_metrics": demo.NEWS_METRICS, "confidence": 0.8}, "input": stage_input}
             elif stage == "sentiment":
                 self.session.log_step("Sentiment Analyst", stage_input, {"sentiment_metrics": demo.SENT_METRICS, "report": demo.SENTIMENT})
                 yield {"type": "stage_done", "stage": stage, "html": md_to_html(demo.SENTIMENT),
-                       "meta": {"sentiment_metrics": demo.SENT_METRICS}, "input": stage_input}
+                       "meta": {"sentiment_metrics": demo.SENT_METRICS, "confidence": 0.7}, "input": stage_input}
             elif stage == "macro_regime":
                 self.session.log_step("Macro Regime Analyst", stage_input, {"macro_regime": demo.MACRO_REGIME, "report": demo.MACRO_REPORT})
                 yield {"type": "stage_done", "stage": stage, "html": md_to_html(demo.MACRO_REPORT),
