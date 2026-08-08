@@ -68,7 +68,7 @@ def make_llm(temperature=None):
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(model=os.environ.get("RAEM_LLM_MODEL", "kimi-k3"),
                           api_key=os.environ["MOONSHOT_API_KEY"],
-                          base_url="https://api.moonshot.ai/v1", temperature=temp)
+                          base_url="https://api.moonshot.ai/v1", temperature=1)
 
     raise ValueError(f"Unknown RAEM_LLM_PROVIDER: {provider}")
 #Ari-----
