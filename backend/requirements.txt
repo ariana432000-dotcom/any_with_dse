@@ -20,6 +20,8 @@ langchain>=0.2
 langchain-core>=0.2
 langchain-anthropic>=0.3   # ✅ ADDED — was imported but missing here, would
                            # have crashed at runtime with the anthropic provider
+langchain-openai>=0.1
+
 langchain-ollama>=0.1
 chromadb>=0.5
 markdown>=3.6
