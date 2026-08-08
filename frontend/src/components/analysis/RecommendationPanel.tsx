@@ -76,6 +76,42 @@ export function RecommendationPanel({ recommendation }: { recommendation: Recomm
         </p>
       )}
 
+      {r.outlook_3d && r.outlook_3d.low !== null && r.outlook_3d.high !== null ? (
+        <div className="mt-4 border-t border-border-soft pt-4">
+          <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-text-faint">
+            {r.outlook_3d.days}-day range (est.)
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-text-faint">If it drops</p>
+              <p className="font-mono text-sm font-medium text-sell">
+                {formatCurrency(r.outlook_3d.low, { currency })}
+              </p>
+              {hasEntry ? (
+                <p className="font-mono text-[11px] text-sell/80">
+                  {pctChange(r.entry_price!, r.outlook_3d.low, isSell)} if sold here
+                </p>
+              ) : null}
+            </div>
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-text-faint">If it rises</p>
+              <p className="font-mono text-sm font-medium text-buy">
+                {formatCurrency(r.outlook_3d.high, { currency })}
+              </p>
+              {hasEntry ? (
+                <p className="font-mono text-[11px] text-buy/80">
+                  {pctChange(r.entry_price!, r.outlook_3d.high, isSell)} if sold here
+                </p>
+              ) : null}
+            </div>
+          </div>
+          <p className="mt-2 text-[11px] text-text-faint">
+            A plausible range from this stock's own recent day-to-day volatility — not a prediction of where
+            the price will actually go in {r.outlook_3d.days} days.
+          </p>
+        </div>
+      ) : null}
+
       {r.reasoning ? (
         <div className="mt-4 border-t border-border-soft pt-4">
           <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-text-faint">
