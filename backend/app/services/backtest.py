@@ -66,6 +66,37 @@ def _group_by(episodes: list[dict], key: str) -> dict[str, list[dict]]:
     return out
 
 
+def _provider_curves(resolved: list[dict]) -> dict[str, list[dict]]:
+    """Independent cumulative-P&L curve per LLM provider. Each provider's
+    line accumulates ONLY its own resolved episodes in their own
+    chronological order -- not one shared running sum split by color --
+    so "Kimi's curve" and "Sonnet's curve" are genuinely comparable
+    standalone equity curves, matching how by_llm_provider's
+    cumulative_return_pct is already computed per group. Episodes with no
+    provider tag ("N/A" -- created before this field existed, see
+    pipeline/memory.py's build_episode_document) are excluded since they
+    can't be attributed to a specific model."""
+    curves: dict[str, list[dict]] = {}
+    for provider, metas in _group_by(resolved, "llm_provider").items():
+        if provider == "N/A":
+            continue
+        rows = sorted(metas, key=lambda m: m.get("trade_date", ""))
+        cumulative = 0.0
+        points = []
+        for m in rows:
+            pnl = _safe_float(m.get("pnl_pct"))
+            cumulative += pnl
+            points.append({
+                "trade_date": m.get("trade_date", ""),
+                "ticker": m.get("company", ""),
+                "pnl_pct": pnl,
+                "cumulative_pnl_pct": round(cumulative, 3),
+                "outcome_label": m.get("outcome_label", ""),
+            })
+        curves[provider] = points
+    return curves
+
+
 def compute_backtest(ticker: str | None = None, limit: int = 500) -> dict:
     """Aggregates a ticker's (or all tickers', if ticker is None) RESOLVED
     episodes into overall + sliced win-rate/P&L stats plus a chronological
@@ -122,4 +153,8 @@ def compute_backtest(ticker: str | None = None, limit: int = 500) -> dict:
             for provider, metas in _group_by(resolved, "llm_provider").items()
         },
         "curve": curve,
+        # Same cumulative-P&L series as "curve" above, but split into one
+        # independent line per LLM provider so Kimi vs. Sonnet can be
+        # plotted as two separate curves on one chart. See _provider_curves.
+        "curve_by_provider": _provider_curves(resolved),
     }
