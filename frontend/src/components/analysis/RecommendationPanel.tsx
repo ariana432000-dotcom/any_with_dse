@@ -6,15 +6,7 @@ import { EmptyState } from "@/components/ui/States";
 import { Target } from "lucide-react";
 
 function pctChange(from: number, to: number, isSell: boolean): string {
-  // 🔴 FIXED: previously always computed raw price change ((to-from)/from),
-  // which is only correct P&L-wise for a BUY/long position. For a SELL
-  // (short) position the P&L is inverted -- price falling to Take Profit
-  // is a GAIN, price rising to Stop Loss is a LOSS -- but the raw price
-  // math showed Take Profit as negative and Stop Loss as positive, which
-  // reads backwards next to those labels (confirmed live: a SELL signal
-  // showed "Take Profit ... -8.2%" and "Stop Loss ... +7.1%"). Flip the
-  // sign for SELL so the shown percentage is actual profit/loss, matching
-  // what each label says.
+
   const raw = ((to - from) / from) * 100;
   const pct = isSell ? -raw : raw;
   const sign = pct > 0 ? "+" : "";
