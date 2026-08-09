@@ -126,12 +126,58 @@ class RAEMMemory:
                 "exit_price": str(round(today_close, 2)),
                 "pnl_pct": str(round(pnl, 2)),
                 "outcome_label": label,
+                # ✅ FIXED: MemoryRecord.from_chroma() (app/ai_engine/memory/schemas.py)
+                # reads the separate "outcome" key, not "outcome_status"/"outcome_label" --
+                # this key was never touched here, so the RAEM Memory panel (which reads
+                # via the Memory API) kept showing "PENDING" forever even after an episode
+                # was fully resolved by this function. Keep both key sets in sync.
+                "outcome": label,
             })
             self.episodic.update(ids=[ep_id], metadatas=[meta])
             resolved += 1
             details.append({"date": ep_date, "signal": signal, "pnl_pct": round(pnl, 2), "label": label})
 
         return {"resolved": resolved, "details": details, "today_close": today_close}
+
+    # -- one-time migration: sync stale "outcome" key on already-RESOLVED episodes --
+    def sync_outcome_keys(self, company: str | None = None) -> dict:
+        """Fix existing episodes that were RESOLVED before the outcome-key fix above
+        went in. Those records have outcome_status=RESOLVED + a correct outcome_label
+        (WIN/LOSS/FLAT), but their separate "outcome" key (read by
+        MemoryRecord.from_chroma / the RAEM Memory panel) was never updated and is
+        stuck on the "PENDING" default. Finds every RESOLVED episode whose "outcome"
+        still disagrees with "outcome_label" and patches it in place.
+
+        Safe to run repeatedly (no-op once everything is in sync). Pass `company`
+        to scope to one ticker, or omit to sweep the whole episodic collection.
+        """
+        self.connect()
+        where = {"outcome_status": "RESOLVED"} if not company else {
+            "$and": [{"company": company}, {"outcome_status": "RESOLVED"}]
+        }
+        try:
+            rows = self.episodic.get(where=where)
+        except Exception as e:  # noqa: BLE001
+            return {"fixed": 0, "checked": 0, "note": f"query error: {e}"}
+
+        ids, metas = rows.get("ids", []), rows.get("metadatas", [])
+        fixed_ids, fixed_details = [], []
+        for ep_id, meta in zip(ids, metas):
+            label = meta.get("outcome_label")
+            if not label or label == "N/A":
+                continue  # nothing correct to migrate from
+            if meta.get("outcome") == label:
+                continue  # already in sync
+            meta = dict(meta)
+            meta["outcome"] = label
+            self.episodic.update(ids=[ep_id], metadatas=[meta])
+            fixed_ids.append(ep_id)
+            fixed_details.append({
+                "company": meta.get("company"), "trade_date": meta.get("trade_date"),
+                "outcome_label": label,
+            })
+
+        return {"checked": len(ids), "fixed": len(fixed_ids), "details": fixed_details}
 
     # -- regime helpers ------------------------------------------------------
     def most_recent_regime(self, company: str, exclude_date: str | None = None):
