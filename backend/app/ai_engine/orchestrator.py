@@ -263,6 +263,11 @@ class Orchestrator:
             state.request.asset_type,
             investment_rounds=state.request.investment_rounds,
             risk_rounds=state.request.risk_rounds,
+            # 🔴 FIXED: was never passed down -- see llm.py::_provider()'s
+            # comment. This is the one line that makes "override .env
+            # provider for this run" (the field's own docstring) actually
+            # true, instead of the override only landing in display metadata.
+            provider_override=state.request.provider,
         )
 
         # The runner is a sync generator; iterate it off-thread, forwarding each
