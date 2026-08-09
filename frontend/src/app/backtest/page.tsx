@@ -83,50 +83,69 @@ export default function BacktestPage() {
         </Card>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <StatCard label="Resolved" value={data.resolved_episodes} hint={`${data.pending_episodes} pending`} />
-            <StatCard label="Win rate" value={formatPercent(data.win_rate * 100, 0)} />
-            <StatCard
-              label="Avg P&L"
-              value={formatPercent(data.avg_pnl_pct)}
-              tone={data.avg_pnl_pct >= 0 ? "buy" : "sell"}
-            />
-            <StatCard label="Win / Loss / Flat" value={`${data.wins} / ${data.losses} / ${data.flats}`} />
-          </div>
+          {(() => {
+            // Shown in each card title below so it's never ambiguous which
+            // ticker (or "All tickers", if none is selected) these numbers
+            // belong to -- the dropdown above sets `selected`, but that
+            // control can scroll out of view while the cards further down
+            // the page stay on screen.
+            const scopeLabel = data.ticker ?? "All tickers";
+            return (
+              <>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <StatCard
+                    label="Resolved"
+                    value={data.resolved_episodes}
+                    hint={`${data.pending_episodes} pending · ${scopeLabel}`}
+                  />
+                  <StatCard label="Win rate" value={formatPercent(data.win_rate * 100, 0)} />
+                  <StatCard
+                    label="Avg P&L"
+                    value={formatPercent(data.avg_pnl_pct)}
+                    tone={data.avg_pnl_pct >= 0 ? "buy" : "sell"}
+                  />
+                  <StatCard label="Win / Loss / Flat" value={`${data.wins} / ${data.losses} / ${data.flats}`} />
+                </div>
 
-          <Card>
-            <CardHeader
-              title="Evaluation Metrics"
-              subtitle="Cumulative Return, Sharpe, Sortino, Max Drawdown, Win Rate, Calmar — over every resolved episode in scope."
-            />
-            <EvaluationMetricsPanel metrics={data.evaluation_metrics} />
-          </Card>
+                <Card>
+                  <CardHeader
+                    title={`Evaluation Metrics — ${scopeLabel}`}
+                    subtitle="Cumulative Return, Sharpe, Sortino, Max Drawdown, Win Rate, Calmar — over every resolved episode in scope."
+                  />
+                  <EvaluationMetricsPanel metrics={data.evaluation_metrics} />
+                </Card>
 
-          <Card>
-            <CardHeader
-              title="By LLM Provider"
-              subtitle="Same six metrics, sliced per model that produced the decision — e.g. Kimi vs. Claude Sonnet 5."
-            />
-            <ProviderComparisonTable byProvider={data.by_llm_provider} />
-          </Card>
+                <Card>
+                  <CardHeader
+                    title={`By LLM Provider — ${scopeLabel}`}
+                    subtitle="Same six metrics, sliced per model that produced the decision — e.g. Kimi vs. Claude Sonnet 5."
+                  />
+                  <ProviderComparisonTable byProvider={data.by_llm_provider} />
+                </Card>
 
-          <Card>
-            <CardHeader
-              title="Cumulative P&L"
-              subtitle="Sum of realized P&L across resolved episodes, in trade-date order."
-            />
-            <EquityCurveChart curve={data.curve} />
-          </Card>
+                <Card>
+                  <CardHeader
+                    title={`Cumulative P&L — ${scopeLabel}`}
+                    subtitle="Sum of realized P&L across resolved episodes, in trade-date order."
+                  />
+                  <EquityCurveChart curve={data.curve} />
+                </Card>
 
-          <Card>
-            <CardHeader title="Breakdowns" subtitle="Where the system's edge (or lack of it) actually comes from." />
-            <div className="grid gap-6 sm:grid-cols-2">
-              <BucketTable title="By signal" buckets={data.by_signal} />
-              <BucketTable title="By stock regime" buckets={data.by_regime} />
-              <BucketTable title="By macro regime" buckets={data.by_macro_regime} />
-              <BucketTable title="By verifier status" buckets={data.by_verifier_status} />
-            </div>
-          </Card>
+                <Card>
+                  <CardHeader
+                    title={`Breakdowns — ${scopeLabel}`}
+                    subtitle="Where the system's edge (or lack of it) actually comes from."
+                  />
+                  <div className="grid gap-6 sm:grid-cols-2">
+                    <BucketTable title="By signal" buckets={data.by_signal} />
+                    <BucketTable title="By stock regime" buckets={data.by_regime} />
+                    <BucketTable title="By macro regime" buckets={data.by_macro_regime} />
+                    <BucketTable title="By verifier status" buckets={data.by_verifier_status} />
+                  </div>
+                </Card>
+              </>
+            );
+          })()}
         </>
       )}
     </div>
