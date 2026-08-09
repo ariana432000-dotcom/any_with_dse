@@ -8,6 +8,7 @@ import { Card, CardHeader } from "@/components/ui/Card";
 import { StatCard } from "@/components/ui/StatCard";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/States";
 import { EquityCurveChart } from "@/components/backtest/EquityCurveChart";
+import { ProviderEquityCurveChart } from "@/components/backtest/ProviderEquityCurveChart";
 import { BucketTable } from "@/components/backtest/BucketTable";
 import { EvaluationMetricsPanel } from "@/components/backtest/EvaluationMetricsPanel";
 import { ProviderComparisonTable } from "@/components/backtest/ProviderComparisonTable";
@@ -129,6 +130,14 @@ export default function BacktestPage() {
                     subtitle="Sum of realized P&L across resolved episodes, in trade-date order."
                   />
                   <EquityCurveChart curve={data.curve} />
+                </Card>
+
+                <Card>
+                  <CardHeader
+                    title={`Cumulative P&L by Provider — ${scopeLabel}`}
+                    subtitle="Same curve, split into one independent line per LLM provider — e.g. Kimi vs. Claude Sonnet 5."
+                  />
+                  <ProviderEquityCurveChart curveByProvider={data.curve_by_provider} />
                 </Card>
 
                 <Card>
