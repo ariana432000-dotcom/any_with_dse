@@ -53,13 +53,19 @@ STAGES = [
 
 class PipelineRunner:
     def __init__(self, company, trade_date, asset_type="stock",
-                 investment_rounds=None, risk_rounds=None, investor_profile=None):
+                 investment_rounds=None, risk_rounds=None, investor_profile=None,
+                 provider_override: str | None = None):
         self.company = company.upper()
         self.trade_date = trade_date
         self.asset_type = asset_type
         self.investment_rounds = investment_rounds or config.DEFAULT_INVESTMENT_ROUNDS
         self.risk_rounds = risk_rounds or config.DEFAULT_RISK_ROUNDS
         self.investor_profile = investor_profile or config.DEFAULT_INVESTOR_PROFILE
+        # 🔴 FIXED: previously dropped on the floor -- see the comment on
+        # llm.py::_provider() for the full story. Lets a per-request
+        # ExecutionRequest.provider actually pick the LLM for this run
+        # instead of only being written into display metadata.
+        self.provider_override = provider_override
         self.session = SessionLog(self.company, self.trade_date, asset_type)
         self.state = {
             "company_of_interest": self.company,
@@ -98,9 +104,10 @@ class PipelineRunner:
             return
 
         from . import agents
-        from .llm import make_llm
+        from .llm import make_llm, provider_label
 
-        llm = make_llm()
+        llm = make_llm(provider_override=self.provider_override)
+        self._llm_provider = provider_label(self.provider_override)
         memory = mem.RAEMMemory()
         idx = 0
 
@@ -447,7 +454,8 @@ class PipelineRunner:
                 self.state.get("sentiment_metrics", {}), final_text,
                 self.state.get("market_raw_data", {}).get("stock_data", ""),
                 macro_regime=self.state.get("macro_regime"),
-                verifier_status=verification.get("status"))
+                verifier_status=verification.get("status"),
+                llm_provider=self._llm_provider)
             yield {"type": "stage_done", "stage": "save_episode",
                    "html": f"<p class='muted'>Episode saved &middot; regime <b>{saved['regime']}</b> &middot; "
                            f"signal <b>{saved['signal']}</b></p>", "meta": saved.get("metadata", {}),
