@@ -27,8 +27,6 @@ export function RecommendationPanel({ recommendation }: { recommendation: Recomm
   const currency: "USD" | "BDT" = r.currency === "BDT" ? "BDT" : "USD";
   const isSell = r.signal?.toString().toUpperCase() === "SELL";
   const hasEntry = r.entry_price !== null && r.entry_price !== undefined;
-  const takeProfitPct = hasEntry && r.take_profit != null ? pctChange(r.entry_price!, r.take_profit, isSell) : null;
-  const stopLossPct = hasEntry && r.stop_loss != null ? pctChange(r.entry_price!, r.stop_loss, isSell) : null;
 
   return (
     <Card>
@@ -45,28 +43,10 @@ export function RecommendationPanel({ recommendation }: { recommendation: Recomm
         </div>
       </div>
 
-      <div className="mt-4 grid grid-cols-3 gap-3 border-t border-border-soft pt-4">
-        <div>
-          <p className="text-[10px] uppercase tracking-wide text-text-faint">Entry</p>
-          <p className="font-mono text-sm font-medium text-text">{formatCurrency(r.entry_price, { currency: currency })}</p>
-        </div>
-        <div>
-          <p className="text-[10px] uppercase tracking-wide text-text-faint">Stop loss</p>
-          <p className="font-mono text-sm font-medium text-sell">{formatCurrency(r.stop_loss, { currency: currency })}</p>
-          {stopLossPct ? <p className="font-mono text-[11px] text-sell/80">{stopLossPct} if hit</p> : null}
-        </div>
-        <div>
-          <p className="text-[10px] uppercase tracking-wide text-text-faint">Take profit</p>
-          <p className="font-mono text-sm font-medium text-buy">{formatCurrency(r.take_profit, { currency: currency })}</p>
-          {takeProfitPct ? <p className="font-mono text-[11px] text-buy/80">{takeProfitPct} if hit</p> : null}
-        </div>
+      <div className="mt-4 border-t border-border-soft pt-4">
+        <p className="text-[10px] uppercase tracking-wide text-text-faint">Entry</p>
+        <p className="font-mono text-sm font-medium text-text">{formatCurrency(r.entry_price, { currency: currency })}</p>
       </div>
-      {(takeProfitPct || stopLossPct) && (
-        <p className="mt-2 text-[11px] text-text-faint">
-          Planned exit levels from this analysis, not a price forecast — the %/gain-loss shown is only what
-          would result <em>if</em> that level is reached, whenever that happens to be.
-        </p>
-      )}
 
       {r.outlook_3d && r.outlook_3d.low !== null && r.outlook_3d.high !== null ? (
         <div className="mt-4 border-t border-border-soft pt-4">
@@ -109,7 +89,7 @@ export function RecommendationPanel({ recommendation }: { recommendation: Recomm
           <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-text-faint">
             Why {r.signal.toString().toUpperCase()}
           </p>
-          <p className="text-xs leading-relaxed text-text-muted">{r.reasoning}</p>
+          <p className="text-sm leading-relaxed text-text-muted">{r.reasoning}</p>
         </div>
       ) : null}
     </Card>
