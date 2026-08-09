@@ -304,12 +304,14 @@ class RAEMMemory:
     def save_episode(self, company, trade_date, indicators, fund_metrics,
                      news_metrics, sentiment_metrics, final_decision_text,
                      stock_data, macro_regime: str | None = None,
-                     verifier_status: str | None = None) -> dict:
+                     verifier_status: str | None = None,
+                     llm_provider: str | None = None) -> dict:
         self.connect()
         doc, meta = build_episode_document(
             company, trade_date, indicators, fund_metrics,
             news_metrics, sentiment_metrics, final_decision_text, stock_data,
             macro_regime=macro_regime, verifier_status=verifier_status,
+            llm_provider=llm_provider,
         )
         ep_id = make_episode_id(company, trade_date)
         self.episodic.upsert(ids=[ep_id], documents=[doc], metadatas=[meta])
@@ -381,7 +383,8 @@ def make_episode_id(company: str, trade_date: str) -> str:
 def build_episode_document(company, trade_date, indicators, fund_metrics,
                            news_metrics, sentiment_metrics, final_decision_text,
                            stock_data, macro_regime: str | None = None,
-                           verifier_status: str | None = None):
+                           verifier_status: str | None = None,
+                           llm_provider: str | None = None):
     import re
     regime = classify_regime(indicators)
     entry_price = None
@@ -428,6 +431,11 @@ Decision Rationale Summary: {final_decision_text[:400]}"""
         "exit_price": "N/A",
         "pnl_pct": "N/A",
         "outcome_label": "N/A",
+        # For Kimi-vs-Sonnet (or any provider) comparison: which LLM actually
+        # produced this trading decision, e.g. "anthropic:claude-sonnet-5" or
+        # "kimi:kimi-k3" -- see app/pipeline/llm.py::provider_label(). Lets
+        # eval_metrics.py / backtest.py slice resolved episodes per model.
+        "llm_provider": llm_provider or "N/A",
         # ✅ CHANGED: the Memory API (app/ai_engine/memory/schemas.py's
         # MemoryRecord.from_chroma) reads a *different* set of metadata key
         # names than RAEM's own code above uses (ticker vs company, decision
