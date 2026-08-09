@@ -9,6 +9,8 @@ import { StatCard } from "@/components/ui/StatCard";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/States";
 import { EquityCurveChart } from "@/components/backtest/EquityCurveChart";
 import { BucketTable } from "@/components/backtest/BucketTable";
+import { EvaluationMetricsPanel } from "@/components/backtest/EvaluationMetricsPanel";
+import { ProviderComparisonTable } from "@/components/backtest/ProviderComparisonTable";
 import { formatPercent } from "@/lib/utils";
 import { BarChart3 } from "lucide-react";
 
@@ -91,6 +93,22 @@ export default function BacktestPage() {
             />
             <StatCard label="Win / Loss / Flat" value={`${data.wins} / ${data.losses} / ${data.flats}`} />
           </div>
+
+          <Card>
+            <CardHeader
+              title="Evaluation Metrics"
+              subtitle="Cumulative Return, Sharpe, Sortino, Max Drawdown, Win Rate, Calmar — over every resolved episode in scope."
+            />
+            <EvaluationMetricsPanel metrics={data.evaluation_metrics} />
+          </Card>
+
+          <Card>
+            <CardHeader
+              title="By LLM Provider"
+              subtitle="Same six metrics, sliced per model that produced the decision — e.g. Kimi vs. Claude Sonnet 5."
+            />
+            <ProviderComparisonTable byProvider={data.by_llm_provider} />
+          </Card>
 
           <Card>
             <CardHeader
