@@ -775,9 +775,21 @@ At the very end, output a Markdown table with EXACTLY these columns:
 # Investment debate (bull / bear / facilitator)
 # ==========================================================================
 def _reports(state):
+    # 🔴 FIXED: 500 chars was cutting every report off mid-sentence (often
+    # before the market analyst's own required indicator table even
+    # appeared -- see create_market_analyst's prompt, which explicitly asks
+    # for a Markdown table at the *end* of the report). Combined with the
+    # "Use ONLY the data in the reports below. Do NOT invent facts or
+    # figures" instruction below, Bull/Bear ended up honestly debating the
+    # truncation itself ("this argument is built only on the figures
+    # visible") instead of the stock -- correct LLM behavior given what it
+    # was shown, but the 500-char slice was the actual bug. 1800 gives
+    # enough room for a full "brief" report + its trailing table without
+    # ballooning the combined prompt (4 reports · 1800 ~= 7.2k chars, still
+    # small for Sonnet/Kimi's context windows).
     return (
-        str(state["market_report"])[:500], str(state["sentiment_report"])[:500],
-        str(state["news_report"])[:500], str(state["fundamentals_report"])[:500],
+        str(state["market_report"])[:1800], str(state["sentiment_report"])[:1800],
+        str(state["news_report"])[:1800], str(state["fundamentals_report"])[:1800],
     )
 
 
@@ -915,10 +927,18 @@ def create_trader(llm):
 # Risk debate (aggressive / conservative / neutral / facilitator)
 # ==========================================================================
 def _risk_reports(state):
+    # 🔴 FIXED: same 500-char truncation issue as _reports() above (see its
+    # comment) -- the Aggressive/Conservative/Neutral risk debaters were
+    # getting the same mid-sentence-cut reports, plus the trader's own plan
+    # truncated too. Raised to 1800 for the four analyst reports; the
+    # trader plan is already a short, structured proposal (Action/
+    # Reasoning/Entry/Stop/Sizing -- see TraderProposal in
+    # tradingagents/agents/schemas.py) so 800 is enough there without
+    # needing the same expansion.
     return (
-        str(state["market_report"])[:500], str(state["sentiment_report"])[:500],
-        str(state["news_report"])[:500], str(state["fundamentals_report"])[:500],
-        str(state["trader_investment_plan"])[:500],
+        str(state["market_report"])[:1800], str(state["sentiment_report"])[:1800],
+        str(state["news_report"])[:1800], str(state["fundamentals_report"])[:1800],
+        str(state["trader_investment_plan"])[:800],
     )
 
 
