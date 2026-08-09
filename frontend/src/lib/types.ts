@@ -307,6 +307,18 @@ export interface BacktestCurvePoint {
   outcome_label: string;
 }
 
+/** Points on a per-provider cumulative curve -- a slimmer shape than
+ * BacktestCurvePoint since _provider_curves() (backend/app/services/
+ * backtest.py) doesn't carry regime/macro_regime/verifier_status per
+ * point. */
+export interface ProviderCurvePoint {
+  trade_date: string;
+  ticker: string;
+  pnl_pct: number;
+  cumulative_pnl_pct: number;
+  outcome_label: string;
+}
+
 export interface EvaluationMetrics {
   n_trades: number;
   cumulative_return_pct: number;
@@ -334,6 +346,7 @@ export interface BacktestResponse {
   evaluation_metrics: EvaluationMetrics;
   by_llm_provider: Record<string, EvaluationMetrics>;
   curve: BacktestCurvePoint[];
+  curve_by_provider: Record<string, ProviderCurvePoint[]>;
 }
 
 // ---------------------------------------------------------------------------
