@@ -20,8 +20,17 @@ import time
 from . import config
 
 
-def _provider() -> str:
-    p = os.environ.get("RAEM_LLM_PROVIDER", "").strip().lower()
+def _provider(override: str | None = None) -> str:
+    # 🔴 FIXED: ExecutionRequest.provider ("override .env provider for this
+    # run") was accepted by the API but silently dropped -- orchestrator.py
+    # only ever read it into metadata (md.provider) for display, never
+    # actually passed it down to PipelineRunner/make_llm(), so every run
+    # used whatever RAEM_LLM_PROVIDER the server process started with,
+    # regardless of what the request asked for. `override` now lets a
+    # caller (PipelineRunner, ultimately the per-request API field) win
+    # over the env var, so Kimi-vs-Sonnet (or any provider) comparisons can
+    # be run request-by-request against one running server.
+    p = (override or os.environ.get("RAEM_LLM_PROVIDER", "")).strip().lower()
     if p:
         return p
     # ✅ CHANGED: Anthropic checked first in auto-detect (was last) — Claude
@@ -37,9 +46,9 @@ def _provider() -> str:
     return "ollama"
 
 
-def make_llm(temperature=None):
+def make_llm(temperature=None, provider_override: str | None = None):
     """Return a chat model for the detected/configured provider."""
-    provider = _provider()
+    provider = _provider(provider_override)
     temp = config.LLM_TEMPERATURE if temperature is None else temperature
 
     if provider == "ollama":
@@ -71,6 +80,24 @@ def make_llm(temperature=None):
                           base_url="https://api.moonshot.ai/v1", temperature=1)
 
     raise ValueError(f"Unknown RAEM_LLM_PROVIDER: {provider}")
+
+
+def provider_label(override: str | None = None) -> str:
+    """'<provider>:<model>' for the currently-configured LLM, e.g.
+    'anthropic:claude-sonnet-5' or 'kimi:kimi-k3'. Used to tag saved
+    episodes with which model actually produced the trading decision, so
+    a Kimi-run vs. Sonnet-run comparison can slice on it later (see
+    app/services/eval_metrics.py / backtest.py's by_llm_provider).
+    Pass the same `override` given to make_llm() so the tag matches the
+    provider actually used for this run, not just the env-var default."""
+    provider = _provider(override)
+    default_models = {
+        "anthropic": "claude-sonnet-5", "kimi": "kimi-k3",
+        "openai": "gpt-4o-mini", "groq": "llama-3.3-70b-versatile",
+        "ollama": config.LLM_MODEL,
+    }
+    model = os.environ.get("RAEM_LLM_MODEL", default_models.get(provider, "unknown"))
+    return f"{provider}:{model}"
 #Ari-----
 def _normalize_content(content):
     """Claude's newer models can return `.content` as a list of content
