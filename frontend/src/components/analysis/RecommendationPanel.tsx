@@ -98,7 +98,7 @@ export function RecommendationPanel({ recommendation }: { recommendation: Recomm
             </div>
           </div>
           <p className="mt-2 text-[11px] text-text-faint">
-            A plausible range from this stock's own recent day-to-day volatility — not a prediction of where
+            A plausible range from this stock&apos;s own recent day-to-day volatility — not a prediction of where
             the price will actually go in {r.outlook_3d.days} days.
           </p>
         </div>
