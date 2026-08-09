@@ -307,6 +307,16 @@ export interface BacktestCurvePoint {
   outcome_label: string;
 }
 
+export interface EvaluationMetrics {
+  n_trades: number;
+  cumulative_return_pct: number;
+  sharpe_ratio: number | null;
+  sortino_ratio: number | null;
+  max_drawdown_pct: number;
+  win_rate_pct: number;
+  calmar_ratio: number | null;
+}
+
 export interface BacktestResponse {
   ticker: string | null;
   total_episodes: number;
@@ -321,6 +331,8 @@ export interface BacktestResponse {
   by_regime: Record<string, BacktestBucket>;
   by_macro_regime: Record<string, BacktestBucket>;
   by_verifier_status: Record<string, BacktestBucket>;
+  evaluation_metrics: EvaluationMetrics;
+  by_llm_provider: Record<string, EvaluationMetrics>;
   curve: BacktestCurvePoint[];
 }
 
