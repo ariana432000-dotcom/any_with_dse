@@ -10,7 +10,6 @@ import { formatDateTime } from "@/lib/utils";
 import { Badge, SignalBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ErrorState, LoadingState } from "@/components/ui/States";
-import { PipelineFlowPanel } from "@/components/analysis/PipelineFlowPanel";
 import { RecommendationPanel } from "@/components/analysis/RecommendationPanel";
 import { StageTabs } from "@/components/analysis/StageTabs";
 import { AnalysisProgress } from "@/components/analysis/AnalysisProgress";
@@ -63,8 +62,6 @@ export default function AnalysisDetailPage({ params }: { params: Promise<{ id: s
       ) : null}
 
       {isActive ? <AnalysisProgress events={events} status={wsStatus} /> : null}
-
-      <PipelineFlowPanel pipeline={analysis.pipeline} />
 
       <RecommendationPanel recommendation={analysis.recommendation} />
 
