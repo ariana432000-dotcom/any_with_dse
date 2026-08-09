@@ -7,9 +7,22 @@ import { analysisApi, ApiError } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card, CardHeader } from "@/components/ui/Card";
 
+// Empty value = "server default" (whatever RAEM_LLM_PROVIDER is set to on
+// the backend right now) -- sent as no `provider` key at all, rather than
+// an empty string, so the backend's own default/auto-detect logic decides.
+// Extend this list if more providers (openai/groq/ollama) get their own
+// entries later; it doesn't need to be exhaustive since a blank field
+// already falls through to whatever the server is configured for.
+const PROVIDER_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "Server default" },
+  { value: "anthropic", label: "Claude Sonnet 5" },
+  { value: "kimi", label: "Kimi K3" },
+];
+
 export function AnalysisForm({ defaultTicker = "" }: { defaultTicker?: string }) {
   const router = useRouter();
   const [ticker, setTicker] = useState(defaultTicker);
+  const [provider, setProvider] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -20,7 +33,10 @@ export function AnalysisForm({ defaultTicker = "" }: { defaultTicker?: string })
     setSubmitting(true);
     setError(null);
     try {
-      const { analysis_id } = await analysisApi.runBackground({ ticker: t });
+      const { analysis_id } = await analysisApi.runBackground({
+        ticker: t,
+        ...(provider ? { provider } : {}),
+      });
       router.push(`/analysis/${analysis_id}`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to start analysis");
@@ -48,6 +64,23 @@ export function AnalysisForm({ defaultTicker = "" }: { defaultTicker?: string })
             className="h-10 w-full rounded-lg border border-border bg-bg-raised px-3 font-mono text-sm uppercase tracking-wide text-text placeholder:text-text-faint placeholder:normal-case focus:border-accent"
             maxLength={10}
           />
+        </div>
+        <div className="sm:w-48">
+          <label htmlFor="provider" className="mb-1.5 block text-xs font-medium text-text-muted">
+            Model
+          </label>
+          <select
+            id="provider"
+            value={provider}
+            onChange={(e) => setProvider(e.target.value)}
+            className="h-10 w-full rounded-lg border border-border bg-bg-raised px-3 text-sm text-text focus:border-accent"
+          >
+            {PROVIDER_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
         </div>
         <Button type="submit" loading={submitting} disabled={!ticker.trim()}>
           {!submitting && <Play className="size-3.5" />}
