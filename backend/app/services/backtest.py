@@ -2,7 +2,13 @@
 Backtest / accuracy aggregation — rolls up RESOLVED RAEM episodes (real P&L
 outcomes, backfilled once enough days have passed — see
 pipeline/memory.py::backfill_pending_outcomes) into win-rate / P&L stats,
-sliceable by signal, regime, macro regime, and verifier status.
+sliceable by signal, regime, macro regime, verifier status, and LLM
+provider (see app/pipeline/llm.py::provider_label / eval_metrics.py).
+
+Adds Sharpe / Sortino / Max Drawdown / Calmar Ratio on top of the existing
+Cumulative Return + Win Rate, so a Kimi-vs-Sonnet (or any provider pair)
+comparison is available in one call via `by_llm_provider` -- see
+app/services/eval_metrics.py for the metric definitions and assumptions.
 
 Reuses RAEMMemory directly rather than the generic MemoryManager/Collection
 path (app/ai_engine/memory) because RAEM's episode metadata schema
@@ -16,6 +22,7 @@ these fields.
 from __future__ import annotations
 
 from app.pipeline.memory import RAEMMemory
+from app.services.eval_metrics import compute_evaluation_metrics
 
 
 def _safe_float(v) -> float:
@@ -45,6 +52,17 @@ def _bucket(episodes: list[dict], key: str) -> dict[str, dict]:
         b["win_rate"] = round(b["wins"] / b["count"], 3) if b["count"] else 0.0
         b["avg_pnl_pct"] = round(b["pnl_sum"] / b["count"], 3) if b["count"] else 0.0
         del b["pnl_sum"]
+    return out
+
+
+def _group_by(episodes: list[dict], key: str) -> dict[str, list[dict]]:
+    """Groups episode metadata dicts by a metadata field -- used for the
+    full per-group evaluation-metric breakdown (by_llm_provider), as
+    opposed to _bucket()'s lighter win-rate/avg-P&L-only breakdown."""
+    out: dict[str, list[dict]] = {}
+    for ep in episodes:
+        k = ep["metadata"].get(key) or "N/A"
+        out.setdefault(k, []).append(ep["metadata"])
     return out
 
 
@@ -93,5 +111,15 @@ def compute_backtest(ticker: str | None = None, limit: int = 500) -> dict:
         "by_regime": _bucket(resolved, "regime"),
         "by_macro_regime": _bucket(resolved, "macro_regime"),
         "by_verifier_status": _bucket(resolved, "verifier_status"),
+        # Full 6-metric evaluation (Cumulative Return, Sharpe, Sortino, Max
+        # Drawdown, Win Rate, Calmar) over every resolved episode in scope,
+        # and the same breakdown sliced per LLM provider/model for a direct
+        # Kimi-vs-Sonnet (or any provider pair) comparison. See
+        # app/services/eval_metrics.py for definitions/assumptions.
+        "evaluation_metrics": compute_evaluation_metrics([e["metadata"] for e in resolved]),
+        "by_llm_provider": {
+            provider: compute_evaluation_metrics(metas)
+            for provider, metas in _group_by(resolved, "llm_provider").items()
+        },
         "curve": curve,
     }
