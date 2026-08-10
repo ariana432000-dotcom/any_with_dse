@@ -306,7 +306,8 @@ class RAEMMemory:
                      news_metrics, sentiment_metrics, final_decision_text,
                      stock_data, macro_regime: str | None = None,
                      verifier_status: str | None = None,
-                     llm_provider: str | None = None) -> dict:
+                     llm_provider: str | None = None,
+                     run_key: str | None = None) -> dict:
         self.connect()
         doc, meta = build_episode_document(
             company, trade_date, indicators, fund_metrics,
@@ -314,7 +315,7 @@ class RAEMMemory:
             macro_regime=macro_regime, verifier_status=verifier_status,
             llm_provider=llm_provider,
         )
-        ep_id = make_episode_id(company, trade_date)
+        ep_id = make_episode_id(company, trade_date, run_key)
         self.episodic.upsert(ids=[ep_id], documents=[doc], metadatas=[meta])
         return {"id": ep_id, "regime": meta["regime"], "signal": meta["final_signal"],
                 "document": doc, "metadata": meta}
@@ -377,8 +378,21 @@ def classify_regime(indicators: dict) -> str:
     return "NEUTRAL_RANGING"
 
 
-def make_episode_id(company: str, trade_date: str) -> str:
-    return hashlib.md5(f"{company}_{trade_date}".encode()).hexdigest()[:16]
+def make_episode_id(company: str, trade_date: str, run_key: str | None = None) -> str:
+    # 🔴 FIXED: ID used to be a pure function of (company, trade_date) --
+    # so running TWO analyses for the same ticker on the same calendar
+    # day (e.g. Kimi then Sonnet, the documented workflow for building a
+    # provider-comparison dataset -- or simply re-running after a bad
+    # result) hashed to the IDENTICAL id. save_episode() below writes
+    # with .upsert(), so the second run silently OVERWROTE the first
+    # run's episode in ChromaDB rather than creating a second one --
+    # losing that trade from history entirely, not just mislabeling it.
+    # `run_key` (the calling session's start timestamp, second-precision
+    # -- see runner.py's save_episode call) makes the id unique per
+    # actual run instead. run_key=None keeps the old id shape for any
+    # caller that hasn't been updated to pass one.
+    key = f"{company}_{trade_date}" if run_key is None else f"{company}_{trade_date}_{run_key}"
+    return hashlib.md5(key.encode()).hexdigest()[:16]
 
 
 def build_episode_document(company, trade_date, indicators, fund_metrics,
@@ -428,7 +442,8 @@ Final Decision: {final_signal}
 Verifier Status: {verifier_status or 'N/A'}
 Decision Rationale Summary: {final_decision_text[:400]}"""
 
-    ep_id = make_episode_id(company, trade_date)
+    # (episode id itself is computed once, in save_episode() above -- this
+    # function only builds the document/metadata that gets written there)
 
     metadata = {
         "company": company,
