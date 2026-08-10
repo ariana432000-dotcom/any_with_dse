@@ -75,11 +75,32 @@ _STAGE_TO_EVENT = {
     "decision_verifier": (EventType.RUNNING_VERIFIER_AGENT, "DecisionVerifier"),
 }
 
-_SIGNAL_RE = re.compile(r"\*{0,2}(BUY|HOLD|SELL)\*{0,2}", re.IGNORECASE)
+_SIGNAL_RE = re.compile(r"\b(BUY|HOLD|SELL)\b", re.IGNORECASE)
 
 
 def _signal(text: str) -> Signal:
-    m = _SIGNAL_RE.search(text or "")
+    # 🔴 FIXED: the old pattern -- r"\*{0,2}(BUY|HOLD|SELL)\*{0,2}" -- had
+    # NO word boundary, and .search() returned the FIRST match anywhere in
+    # the whole report. Financial prose is full of words that merely
+    # *contain* "hold" as a substring -- "shareholders", "stakeholders",
+    # "withholding", "holder" -- so one of those, appearing early in a
+    # multi-paragraph report, got matched as the analyst's verdict long
+    # before the report's own concluding "FINAL TRANSACTION PROPOSAL:
+    # BUY/HOLD/SELL" line was ever reached. Every analyst prompt is
+    # instructed to end with that exact line (see e.g.
+    # create_fundamentals_analyst's prompt in pipeline/agents.py, and its
+    # own extract_final_proposal() which already anchors on it correctly)
+    # -- so mirror that here: search a window right after that anchor
+    # first, with a word-boundary-safe pattern, and only fall back to a
+    # first-match scan of the whole text if the anchor itself is missing.
+    text = text or ""
+    idx = text.upper().find("FINAL TRANSACTION PROPOSAL")
+    if idx != -1:
+        window = text[idx: idx + 150]
+        m = _SIGNAL_RE.search(window)
+        if m:
+            return Signal(m.group(1).upper())
+    m = _SIGNAL_RE.search(text)
     return Signal(m.group(1).upper()) if m else Signal.NA
 
 
