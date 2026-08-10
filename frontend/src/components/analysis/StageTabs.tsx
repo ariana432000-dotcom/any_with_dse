@@ -41,7 +41,7 @@ function AgentFullView({ label, agent }: { label: string; agent: AgentView | nul
           <span className="font-mono text-[11px] text-text-faint">{Math.round(agent.latency_ms)}ms</span>
         ) : null}
       </div>
-      <p className="whitespace-pre-line text-xs leading-relaxed text-text-muted">
+      <p className="whitespace-pre-line text-sm leading-relaxed text-text-muted">
         {agent.error || agent.analysis || "No analysis text returned."}
       </p>
     </div>
