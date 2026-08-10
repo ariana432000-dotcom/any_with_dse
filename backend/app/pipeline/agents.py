@@ -567,8 +567,6 @@ Include RSI, MACD, Bollinger Bands, SMA analysis.
 At the very end, output a Markdown table with EXACTLY these columns:
 | Indicator | Value | Signal | Interpretation |
 
-Then, on its own line after the table: FINAL TRANSACTION PROPOSAL: **BUY** / **HOLD** / **SELL**
-
 === STOCK PRICE DATA ===
 {stock_data}
 
@@ -631,8 +629,6 @@ Sections: Company News Summary -> Global Macro Trends -> Sentiment Assessment ->
 At the very end, output a Markdown table with EXACTLY these 5 columns:
 | Category | Headline | Sentiment | Impact | Source |
 (Fill 4-6 rows. Sentiment must be POSITIVE / NEGATIVE / NEUTRAL.)
-
-Then, on its own line after the table: FINAL TRANSACTION PROPOSAL: **BUY** / **HOLD** / **SELL**
 
 === COMPANY NEWS ({company}) ===
 {company_news}
@@ -735,8 +731,6 @@ Sections: Data Source Review -> Score Breakdown -> Key Signals -> Confidence Ass
 
 At the very end, output a Markdown table with EXACTLY these columns:
 | Source | Sentiment | Score (1-10) | Confidence | Key Signal |
-
-Then, on its own line after the table: FINAL TRANSACTION PROPOSAL: **BUY** / **HOLD** / **SELL**
 
 === NEWS-FLOW SENTIMENT (from News Analyst) ===
 {data_sections}
