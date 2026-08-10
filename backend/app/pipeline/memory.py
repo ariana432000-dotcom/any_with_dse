@@ -309,13 +309,23 @@ class RAEMMemory:
                      llm_provider: str | None = None,
                      run_key: str | None = None) -> dict:
         self.connect()
+        # 🔴 FIXED: compute the id ONCE, here, and pass it into
+        # build_episode_document() -- it needs the id too, for the
+        # "memory_id" field in the Memory-API-compatibility metadata block
+        # (see that block's own comment). Previously build_episode_document
+        # computed its own separate, second copy of this id internally;
+        # removing that (as part of the run_key fix above, since it was
+        # only used for the ChromaDB write which already happens here in
+        # save_episode) broke memory_id with a NameError, because it turned
+        # out NOT to be fully dead code. Single computation now avoids that
+        # class of bug entirely -- there's only one id, used everywhere.
+        ep_id = make_episode_id(company, trade_date, run_key)
         doc, meta = build_episode_document(
             company, trade_date, indicators, fund_metrics,
             news_metrics, sentiment_metrics, final_decision_text, stock_data,
             macro_regime=macro_regime, verifier_status=verifier_status,
-            llm_provider=llm_provider,
+            llm_provider=llm_provider, ep_id=ep_id,
         )
-        ep_id = make_episode_id(company, trade_date, run_key)
         self.episodic.upsert(ids=[ep_id], documents=[doc], metadatas=[meta])
         return {"id": ep_id, "regime": meta["regime"], "signal": meta["final_signal"],
                 "document": doc, "metadata": meta}
@@ -399,7 +409,8 @@ def build_episode_document(company, trade_date, indicators, fund_metrics,
                            news_metrics, sentiment_metrics, final_decision_text,
                            stock_data, macro_regime: str | None = None,
                            verifier_status: str | None = None,
-                           llm_provider: str | None = None):
+                           llm_provider: str | None = None,
+                           ep_id: str | None = None):
     import re
     regime = classify_regime(indicators)
     entry_price = None
@@ -442,8 +453,9 @@ Final Decision: {final_signal}
 Verifier Status: {verifier_status or 'N/A'}
 Decision Rationale Summary: {final_decision_text[:400]}"""
 
-    # (episode id itself is computed once, in save_episode() above -- this
-    # function only builds the document/metadata that gets written there)
+    # (episode id itself is computed once in save_episode() and passed in
+    # as `ep_id`, rather than recomputed here -- see that function's
+    # comment. Used below for the "memory_id" Memory-API-compat field.)
 
     metadata = {
         "company": company,
