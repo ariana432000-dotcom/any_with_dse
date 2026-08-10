@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import config
+from .render import first_signal
 
 
 class SessionLog:
@@ -126,8 +127,14 @@ class SessionLog:
         self.data["final_decision"] = final_decision
 
         st = self.data["summary_table"]
-        m = re.search(r"\*{0,2}(BUY|HOLD|SELL)\*{0,2}", final_decision, re.IGNORECASE)
-        st["final_signal"] = m.group(1).upper() if m else "N/A"
+        # 🔴 FIXED: fifth (and last found) copy of the same buggy regex --
+        # see render.py::first_signal()'s comment for the full story.
+        # Lower severity than the other four instances since this
+        # summary_table["final_signal"] is only ever written to the
+        # persisted session-log JSON file and never read back by any
+        # decision-making or backtesting code -- but still worth fixing so
+        # the log file itself isn't misleading if read directly later.
+        st["final_signal"] = first_signal(final_decision)
         st["final_decision"] = final_decision[:600]
 
         tbl = re.search(
