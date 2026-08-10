@@ -13,6 +13,7 @@ import hashlib
 from datetime import datetime, timedelta
 
 from . import config
+from .render import first_signal
 
 
 class RAEMMemory:
@@ -399,8 +400,22 @@ def build_episode_document(company, trade_date, indicators, fund_metrics,
                 except ValueError:
                     pass
 
-    m = re.search(r"\*{0,2}(BUY|HOLD|SELL)\*{0,2}", final_decision_text, re.IGNORECASE)
-    final_signal = m.group(1).upper() if m else "N/A"
+    # 🔴 FIXED: this was its own fourth independent copy of the same buggy
+    # regex found (and fixed) in render.py::first_signal(),
+    # orchestrator.py::_signal(), and agents.py::run_decision_verifier() --
+    # no word boundary, first-match-anywhere, so a word merely containing
+    # "hold" ("shareholders", "stakeholders", ...) appearing before the
+    # decision text's own "FINAL TRANSACTION PROPOSAL" line could get
+    # saved as this episode's final_signal. This is the most consequential
+    # instance of the four: final_signal gets written straight into the
+    # episode's permanent ChromaDB metadata (below) and is later read back
+    # by backfill_pending_outcomes() (this same file, ~line 115) to decide
+    # the P&L formula's sign -- ((close-entry)/entry for BUY vs the
+    # inverse for SELL. A wrong final_signal here doesn't just mislabel
+    # the episode, it can flip a real WIN into a recorded LOSS (or hide it
+    # as a false FLAT), corrupting the win-rate/Sharpe/backtest numbers
+    # downstream. Reuses the already-fixed shared implementation.
+    final_signal = first_signal(final_decision_text)
 
     document_text = f"""Trading Episode: {company} on {trade_date}
 Market Regime: {regime}
