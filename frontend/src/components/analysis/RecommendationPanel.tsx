@@ -5,6 +5,7 @@ import { formatCurrency } from "@/lib/utils";
 import { EmptyState } from "@/components/ui/States";
 import { Target } from "lucide-react";
 
+
 function pctChange(from: number, to: number, isSell: boolean): string {
 
   const raw = ((to - from) / from) * 100;
