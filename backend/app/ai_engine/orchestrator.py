@@ -25,6 +25,7 @@ import asyncio
 import re
 import statistics
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from app.ai_engine.events import EventEmitter, EventType, progress_for
 from app.ai_engine.memory import MemoryManager, get_memory_manager
@@ -74,6 +75,24 @@ _STAGE_TO_EVENT = {
     "portfolio_manager": (EventType.RUNNING_PORTFOLIO_MANAGER, "PortfolioManager"),
     "decision_verifier": (EventType.RUNNING_VERIFIER_AGENT, "DecisionVerifier"),
 }
+
+def _dhaka_today() -> str:
+    # 🔴 FIXED: the call site below used bare `datetime.now()` -- a naive
+    # datetime that resolves to whatever timezone the server's OS/container
+    # is set to (Railway containers default to UTC), NOT Bangladesh time.
+    # Every other timestamp in this file explicitly uses
+    # datetime.now(timezone.utc), so this one bare call was already an
+    # outlier -- and for a DSE-focused tool it's the wrong zone entirely.
+    # Dhaka is UTC+6, so any run made in the small hours locally (e.g.
+    # 1-3 AM Dhaka time -- which is 7-9 PM UTC the PREVIOUS calendar day)
+    # got tagged with YESTERDAY's date server-side. That silently threw
+    # off backfill_pending_outcomes()'s days_held calculation (memory.py)
+    # for any episode created or resolved in that window -- a decision
+    # made "this morning" Dhaka time could get recorded a day earlier than
+    # the user's own calendar, making PENDING episodes look like they
+    # need an extra day before resolving that they didn't actually need.
+    return datetime.now(ZoneInfo("Asia/Dhaka")).strftime("%Y-%m-%d")
+
 
 _SIGNAL_RE = re.compile(r"\b(BUY|HOLD|SELL)\b", re.IGNORECASE)
 
@@ -280,7 +299,7 @@ class Orchestrator:
         from app.pipeline.runner import PipelineRunner
 
         runner = PipelineRunner(
-            state.ticker, state.request.date or datetime.now().strftime("%Y-%m-%d"),
+            state.ticker, state.request.date or _dhaka_today(),
             state.request.asset_type,
             investment_rounds=state.request.investment_rounds,
             risk_rounds=state.request.risk_rounds,
