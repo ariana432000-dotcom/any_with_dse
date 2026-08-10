@@ -228,6 +228,19 @@ class PortfolioDecision(BaseModel):
         return _coerce_optional_float(v)
 
 
+# Deterministic 5-tier -> 3-tier mapping, used by render_pm_decision() below.
+# Overweight/Underweight are directional (more/less than benchmark), so they
+# map to the same actionable side as Buy/Sell respectively -- Hold is the
+# only truly neutral tier.
+_RATING_TO_SIGNAL = {
+    PortfolioRating.BUY: "BUY",
+    PortfolioRating.OVERWEIGHT: "BUY",
+    PortfolioRating.HOLD: "HOLD",
+    PortfolioRating.UNDERWEIGHT: "SELL",
+    PortfolioRating.SELL: "SELL",
+}
+
+
 def render_pm_decision(decision: PortfolioDecision) -> str:
     """Render a PortfolioDecision back to the markdown shape the rest of the system expects.
 
@@ -235,6 +248,20 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
     so the rendered output preserves the exact section headers (``**Rating**``,
     ``**Executive Summary**``, ``**Investment Thesis**``) that downstream
     parsers and the report writers already handle.
+
+    🔴 FIXED: this never used to emit a "FINAL TRANSACTION PROPOSAL:
+    BUY/HOLD/SELL" line at all -- decision.rating is a 5-tier value (Buy /
+    Overweight / Hold / Underweight / Sell), not the 3-tier BUY/HOLD/SELL
+    the rest of the pipeline expects (episode signal, agent-card badges,
+    backtest bucketing). With no anchor phrase to find, orchestrator.py's
+    _signal() fell back to scanning the free-form Executive Summary /
+    Investment Thesis prose for the first standalone BUY/HOLD/SELL word --
+    completely independent of what `rating` actually said. A real case:
+    rating=Underweight ("reduce to a below-neutral weight, trim existing
+    holdings, open no new positions") still got badged BUY, because some
+    unrelated word elsewhere in the prose happened to match first. Now
+    explicitly derived from `rating` itself via _RATING_TO_SIGNAL --
+    deterministic, no text-guessing involved.
     """
     parts = [
         f"**Rating**: {decision.rating.value}",
@@ -247,6 +274,8 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         parts.extend(["", f"**Price Target**: {decision.price_target}"])
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    signal = _RATING_TO_SIGNAL.get(decision.rating, "HOLD")
+    parts.extend(["", f"FINAL TRANSACTION PROPOSAL: **{signal}**"])
     return "\n".join(parts)
 
 
