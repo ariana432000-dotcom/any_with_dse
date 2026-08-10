@@ -440,8 +440,8 @@ class Orchestrator:
             # stop-loss/take-profit against, see _extract_price.
             ref_price = state.market.latest_close if state.market else None
             state.risk = RiskState(
-                rating=_extract(text, r"(LOW|MEDIUM|HIGH)\s*(?:risk)?", "MEDIUM"),
-                position_sizing=_extract(text, r"(\d{1,3}\s*%)", ""),
+                rating=_extract(text, r"(LOW|MEDIUM|HIGH)\s*(?:risk)?", "MEDIUM", near="risk rating"),
+                position_sizing=_extract(text, r"(\d{1,3}\s*%)", "", near="position siz"),
                 stop_loss=_extract_price(text, r"stop[- ]?loss", reference_price=ref_price),
                 take_profit=_extract_price(text, r"take[- ]?profit", reference_price=ref_price),
                 summary=text[:800],
@@ -608,8 +608,28 @@ def _strip_html(html: str) -> str:
     return re.sub(r"<[^>]+>", " ", html).replace("&amp;", "&").replace("&nbsp;", " ").strip()
 
 
-def _extract(text: str, pattern: str, default: str = "") -> str:
-    m = re.search(pattern, text or "", re.IGNORECASE)
+def _extract(text: str, pattern: str, default: str = "", near: str | None = None) -> str:
+    # 🔴 FIXED: plain first-match-anywhere was risky for generic words/
+    # numbers that commonly appear in free-form reasoning well before the
+    # facilitator's actual stated recommendation -- e.g. "medium-term
+    # horizon" or "high volatility" appearing early in the text could get
+    # matched as the risk RATING, and a percentage cited while explaining
+    # the risk:reward math (e.g. "-9.6% risk", "0.6:1") could get matched
+    # as POSITION SIZING, well before the real "Position sizing: 6%" line.
+    # `near`, when given, first tries to match within a short window right
+    # after that label (e.g. "risk rating", "position siz") -- the same
+    # anchor-near-the-actual-label approach used by _extract_price() below
+    # for stop-loss/take-profit -- falling back to a first-match scan of
+    # the whole text only if the label itself isn't found.
+    text = text or ""
+    if near:
+        idx = text.lower().find(near.lower())
+        if idx != -1:
+            window = text[idx: idx + 100]
+            m = re.search(pattern, window, re.IGNORECASE)
+            if m:
+                return m.group(1).upper()
+    m = re.search(pattern, text, re.IGNORECASE)
     return m.group(1).upper() if m else default
 
 
