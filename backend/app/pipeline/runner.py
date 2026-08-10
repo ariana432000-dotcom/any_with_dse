@@ -490,7 +490,18 @@ class PipelineRunner:
                 self.state.get("market_raw_data", {}).get("stock_data", ""),
                 macro_regime=self.state.get("macro_regime"),
                 verifier_status=verification.get("status"),
-                llm_provider=self._llm_provider)
+                llm_provider=self._llm_provider,
+                # 🔴 FIXED: without this, two runs for the same ticker on
+                # the same calendar day (e.g. Kimi then Sonnet -- exactly
+                # the documented workflow for a provider comparison, or
+                # just re-running after a bad result) hashed to the same
+                # episode id and the second run silently overwrote the
+                # first's episode in ChromaDB. session_start is already a
+                # per-run, second-precision timestamp (see logger.py's
+                # SessionLog.__init__) -- reusing it here rather than
+                # calling datetime.now() again keeps "this run's identity"
+                # defined in exactly one place.
+                run_key=self.session.data.get("session_start"))
             yield {"type": "stage_done", "stage": "save_episode",
                    "html": f"<p class='muted'>Episode saved &middot; regime <b>{saved['regime']}</b> &middot; "
                            f"signal <b>{saved['signal']}</b></p>", "meta": saved.get("metadata", {}),
