@@ -26,6 +26,17 @@ setup_logging()
 log = get_logger("app.workers.scheduler")
 
 MARKET_TZ = ZoneInfo("America/New_York")
+# ✅ FIXED: is_market_open_now() used to check ONLY America/New_York hours,
+# even for DSE (Dhaka Stock Exchange) tickers on the watchlist. NYSE
+# (9:30-16:00 ET) and DSE (10:00-14:30 Asia/Dhaka) sessions never overlap,
+# so with DATASET_JOB_MARKET_HOURS_ONLY=true (the default) the dataset job
+# would fire while DSE was closed (using a stale prior-day close) and
+# never fire during DSE's actual trading window. Every other market-data
+# path in this codebase (market_data.py, agents.py, symbol_utils.py,
+# dse_fundamentals.py) already branches on is_dse_ticker() -- this was the
+# one place that didn't. Now each ticker is checked against its own
+# exchange's session.
+DSE_MARKET_TZ = ZoneInfo("Asia/Dhaka")
 
 # In-process overlap guard: a batch across N tickers can legitimately take a
 # long time on local CPU inference, so we must never let a new 2h trigger
@@ -52,7 +63,7 @@ async def refresh_market_data() -> None:
             log.warning("refresh failed for %s: %s", ticker, e)
 
 
-def is_market_open_now() -> bool:
+def is_nyse_open_now() -> bool:
     """US equities regular session: 9:30-16:00 America/New_York, Mon-Fri.
     Deliberately does not account for market holidays (no holiday calendar
     here) — worst case the job fires a few extra times a year on a closed
@@ -64,6 +75,40 @@ def is_market_open_now() -> bool:
     open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
     close_t = now.replace(hour=16, minute=0, second=0, microsecond=0)
     return open_t <= now <= close_t
+
+
+def is_dse_open_now() -> bool:
+    """DSE (Dhaka Stock Exchange) regular session: 10:00-14:30 Asia/Dhaka.
+    Bangladesh's weekend is Friday-Saturday (not Saturday-Sunday), so
+    trading days are Sunday-Thursday. Same no-holiday-calendar caveat as
+    is_nyse_open_now()."""
+    now = datetime.now(DSE_MARKET_TZ)
+    if now.weekday() in (4, 5):  # Friday=4, Saturday=5
+        return False
+    open_t = now.replace(hour=10, minute=0, second=0, microsecond=0)
+    close_t = now.replace(hour=14, minute=30, second=0, microsecond=0)
+    return open_t <= now <= close_t
+
+
+def is_market_open_for_ticker(ticker: str) -> bool:
+    """Routes to the right exchange's session hours for this ticker --
+    DSE trading codes check Dhaka hours, everything else checks NYSE
+    hours. This is what the dataset job's per-ticker skip should use
+    instead of a single US-only gate (see the ✅ FIXED note above)."""
+    try:
+        from tradingagents.dataflows.symbol_utils import is_dse_ticker
+        if is_dse_ticker(ticker):
+            return is_dse_open_now()
+    except Exception:  # noqa: BLE001
+        pass
+    return is_nyse_open_now()
+
+
+def is_market_open_now() -> bool:
+    """Back-compat name for callers that don't have a specific ticker in
+    hand (checks NYSE hours only). Prefer is_market_open_for_ticker() for
+    anything that iterates a watchlist that may contain DSE tickers."""
+    return is_nyse_open_now()
 
 
 async def _get_last_dataset_run() -> datetime | None:
@@ -133,6 +178,13 @@ async def run_dataset_job() -> None:
 
     log.info("dataset job starting for %d ticker(s): %s", len(tickers), tickers)
     for ticker in tickers:
+        # ✅ FIXED: per-ticker check (not one blanket NYSE-hours gate) --
+        # see is_market_open_for_ticker()'s note. A mixed watchlist (US +
+        # DSE tickers) now runs each ticker only during ITS OWN exchange's
+        # session instead of everything riding on NYSE hours alone.
+        if settings.DATASET_JOB_MARKET_HOURS_ONLY and not is_market_open_for_ticker(ticker):
+            log.info("dataset job: skipping %s -- its market is closed right now", ticker)
+            continue
         await run_dataset_job_for_ticker(ticker)
     log.info("dataset job finished")
 
@@ -144,7 +196,14 @@ async def maybe_trigger_dataset_job() -> None:
     global _dataset_job_running
     if _dataset_job_running:
         return
-    if settings.DATASET_JOB_MARKET_HOURS_ONLY and not is_market_open_now():
+    # ✅ FIXED: this used to be `not is_market_open_now()` -- NYSE hours
+    # only -- which blocked the whole batch (including any DSE tickers)
+    # any time NYSE was closed, even during DSE's own trading window (the
+    # two sessions never overlap). Now this outer gate only checks "is
+    # *any* exchange we care about open" so the batch isn't blocked
+    # outright; run_dataset_job() below does the real per-ticker exchange
+    # check and skips individual tickers whose own market is closed.
+    if settings.DATASET_JOB_MARKET_HOURS_ONLY and not (is_nyse_open_now() or is_dse_open_now()):
         return
 
     now = datetime.now(timezone.utc)
