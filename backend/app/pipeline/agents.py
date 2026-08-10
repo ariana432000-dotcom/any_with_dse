@@ -12,6 +12,7 @@ import re
 import time
 
 from .llm import invoke_llm_with_retry
+from .render import first_signal
 
 
 # ==========================================================================
@@ -1034,7 +1035,17 @@ def create_risk_facilitator(llm):
 
     def node(state):
         rd = state["risk_debate_state"]
-        trader_decision = str(state.get("trader_investment_plan", ""))[:500]
+        # 🔴 FIXED: 500 chars almost never reached past the Trader
+        # proposal's own Reasoning paragraph (routinely 500+ chars on its
+        # own -- see render_trader_proposal in tradingagents/agents/
+        # schemas.py) -- so the Risk Facilitator was making its position-
+        # sizing / stop-loss / take-profit call having never actually seen
+        # the Trader's own stated Entry Price, Stop Loss, Position Sizing,
+        # or FINAL TRANSACTION PROPOSAL line, all of which come *after*
+        # Reasoning in the rendered proposal. This is the likely cause of
+        # the Facilitator's own stop-loss/take-profit fields showing up
+        # empty in practice -- it had nothing concrete to anchor them to.
+        trader_decision = str(state.get("trader_investment_plan", ""))[:2000]
         prompt = f"""IMPORTANT: Base your assessment ONLY on the debate history provided. Do NOT use external knowledge.
 You are the Risk Management Debate Facilitator.
 
@@ -1082,6 +1093,19 @@ def create_portfolio_manager(llm):
         asset_type = state.get("asset_type", "stock")
         instrument_context = build_instrument_context(company_name, asset_type)
         risk_history = state["risk_debate_state"].get("history", "")
+        # 🔴 FIXED: same disconnect as the Trader stage had with the
+        # Investment Facilitator (see runner.py's investment_plan comment)
+        # -- the Risk Facilitator's own verdict (position sizing / stop-
+        # loss / take-profit / risk rating -- its entire job, see its
+        # card: "Position sizing, stop-loss / take-profit, risk rating")
+        # was computed and stored in state["risk_facilitator_decision"],
+        # and even shown in this stage's own "Input" tab on the frontend
+        # (portfolio_manager_input in runner.py) -- but was never actually
+        # read here, so the Portfolio Manager only ever saw the raw
+        # Aggressive/Conservative/Neutral transcript and independently
+        # re-derived its own sizing/risk call, free to silently contradict
+        # the Facilitator's official one.
+        risk_facilitator_decision = state.get("risk_facilitator_decision", "")
         trader_plan = state.get("trader_investment_plan", "")
         past_context = state.get("past_context", "")
         investor_profile = state.get("investor_profile", "Aggressive")
@@ -1090,10 +1114,14 @@ def create_portfolio_manager(llm):
             f"You are the Portfolio Manager making the final investment decision for {company_name}. "
             f"{instrument_context}\n\n"
             f"Investor Profile: {investor_profile}\n\n"
-            f"Review the risk analysts' debate and the trader's proposal, "
-            f"then issue a final rating tailored to this investor profile.\n\n"
+            f"Review the Risk Facilitator's verdict below as the primary synthesis of the risk "
+            f"debate, along with the trader's proposal, then issue a final rating tailored to "
+            f"this investor profile.\n\n"
             f"Trader Proposal:\n{trader_plan[:800]}\n\n"
-            f"Risk Analysts Debate:\n{risk_history[:1500]}\n\n"
+            f"Risk Facilitator's Verdict (position sizing / stop-loss / take-profit / risk rating "
+            f"-- treat this as the primary conclusion of the risk debate, not merely one more "
+            f"opinion):\n{risk_facilitator_decision[:800]}\n\n"
+            f"Risk Analysts Debate (supporting detail):\n{risk_history[:1500]}\n\n"
         )
         if past_context:
             prompt_text += f"Past context:\n{past_context}\n\n"
@@ -1557,7 +1585,7 @@ def llm_signal_consistency_check(final_decision_text: str, llm) -> str:
     prompt = f"""You are a fact-checking auditor reviewing a trading decision before it is finalized.
 
 === FINAL DECISION TEXT ===
-{final_decision_text[:1200]}
+{final_decision_text[:2000]}
 
 Check ONLY this one thing:
 
@@ -1604,8 +1632,12 @@ def run_decision_verifier(final_decision_text: str, indicators: dict, fund_metri
     revert: re-add `rule_warnings` to the `status =` line below and
     restore the auto-override block that used to follow it (see git
     history / prior version of this function)."""
-    sig_match = re.search(r"\*{0,2}(BUY|HOLD|SELL)\*{0,2}", final_decision_text, re.IGNORECASE)
-    final_signal = sig_match.group(1).upper() if sig_match else "N/A"
+    # 🔴 FIXED: this used to have its own separate, buggy regex --
+    # r"\*{0,2}(BUY|HOLD|SELL)\*{0,2}" with no word boundary, first-match-
+    # anywhere -- a third independent copy of the same bug fixed in
+    # render.py::first_signal() and orchestrator.py::_signal(). Reuses the
+    # fixed shared implementation instead of re-diverging.
+    final_signal = first_signal(final_decision_text)
 
     log("running rule-based checks (advisory only -- does not flag status)")
     rule_warnings, rule_info_notes = rule_based_checks(
