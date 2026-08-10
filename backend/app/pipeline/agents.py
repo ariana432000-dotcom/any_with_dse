@@ -862,6 +862,15 @@ You are the Investment Debate Facilitator. Your job is to:
 3. Declare a WINNER with clear reasoning
 4. Provide a final investment recommendation
 
+STRUCTURAL NOTE ON ORDER: this debate always runs Bull then Bear in every
+round, so Bear structurally gets the last word before you judge it -- that
+is an artifact of turn order, not evidence of a stronger case. Do NOT give
+extra weight to whichever side's argument you read most recently or which
+side technically "answered" the other last. Evaluate each round's points
+on their own factual/logical merit, and explicitly check: are there Bull
+points from EARLIER rounds that Bear never actually rebutted, just spoke
+after? An unrebutted earlier point is still a live point.
+
 Full Debate History:
 {ds.get('history', '')}
 
@@ -1068,6 +1077,12 @@ Your tasks:
 3. Provide position sizing recommendation (e.g., 25% / 50% / 75% of portfolio)
 4. Set stop-loss and take-profit levels based on the debate outcome
 5. Final risk rating: LOW / MEDIUM / HIGH
+
+STRUCTURAL NOTE ON ORDER: this debate always runs Aggressive, then
+Conservative, then Neutral, in that exact order every round -- so Neutral
+structurally gets the last word before you judge, which is an artifact of
+turn order, not evidence of the strongest case. Do not give extra weight
+to whichever perspective you read most recently.
 
 Be specific and data-driven in your assessment.
 """ + U["get_language_instruction"]()
