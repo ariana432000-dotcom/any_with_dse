@@ -298,7 +298,7 @@ class PipelineRunner:
         if macro_regime:
             memory_context = (memory_context or "") + (
                 f"\n\n**Macro Regime (market-wide):** {macro_regime}\n"
-                f"{str(self.state.get('macro_report', ''))[:400]}"
+                f"{str(self.state.get('macro_report', ''))[:800]}"
             )
         memory_input = {
             "company": self.company, "today_regime": today_regime,
