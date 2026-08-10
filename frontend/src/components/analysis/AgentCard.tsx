@@ -37,7 +37,7 @@ export function AgentCard({ label, agent }: { label: string; agent: AgentView | 
           </p>
         </div>
       </div>
-      <p className="mt-3 line-clamp-4 text-xs leading-relaxed text-text-muted">
+      <p className="mt-3 line-clamp-4 text-sm leading-relaxed text-text-muted">
         {agent.error || agent.analysis || "No analysis text returned."}
       </p>
     </Card>
