@@ -333,7 +333,42 @@ class PipelineRunner:
         # -- trader --
         idx += 1
         yield self._start("trader", idx)
-        self.state["investment_plan"] = final_debate["history"][:2000] + memory_context
+        # 🔴 FIXED: this used to be just `final_debate["history"][:2000] +
+        # memory_context` -- the raw, unweighted Bull vs Bear back-and-forth,
+        # with NO mention of what the Investment Facilitator actually
+        # decided. The Facilitator's entire job (see its card: "Declares a
+        # debate winner + a BUY/SELL/HOLD recommendation") was computed
+        # just above and stored in self.state["investment_facilitator_decision"]
+        # -- but that verdict was never threaded into investment_plan, so
+        # the Trader re-litigated the raw transcript from scratch and could
+        # (and did, in practice) land on a recommendation that flatly
+        # contradicts the Facilitator's official one -- e.g. Facilitator
+        # says "BEAR WINS -- SELL" while the Trader, never having seen that,
+        # independently proposes BUY. `final_debate` also can't fix this by
+        # itself: it's a reference captured *before* the facilitator ran,
+        # so its dict doesn't carry the "facilitator_decision" key even
+        # though the facilitator node technically writes one into a fresh
+        # copy of investment_debate_state -- self.state["investment_facilitator_decision"]
+        # (the plain top-level key, freshly set via self.state.update(out)
+        # right above) is the one guaranteed to be current.
+        facilitator_decision = self.state.get("investment_facilitator_decision", "")
+        # Just the two *final* positions (post-rebuttal) rather than the
+        # full multi-round transcript -- final_debate["history"] repeats
+        # every round from both sides, most of which gets superseded by
+        # each side's own later rebuttal anyway. bull_history/bear_history
+        # accumulate per-side across rounds (see create_bull_researcher /
+        # create_bear_researcher above), so _last_turn() on each pulls out
+        # exactly the last, most-refined argument from that side.
+        last_bull = _last_turn(final_debate.get("bull_history", ""))
+        last_bear = _last_turn(final_debate.get("bear_history", ""))
+        self.state["investment_plan"] = (
+            "**Investment Facilitator's Verdict** (the synthesized outcome of the debate below "
+            "-- weigh this as the primary conclusion, not merely one more opinion alongside the "
+            f"raw transcript):\n{facilitator_decision[:800]}\n\n"
+            f"**Bull Analyst's final position:**\n{last_bull[:1000]}\n\n"
+            f"**Bear Analyst's final position:**\n{last_bear[:1000]}"
+            + memory_context
+        )
         if post_mortem_lessons:
             self.state["investment_plan"] += (
                 f"\n\n**Post-Mortem Lessons (cross-regime track record):**\n{post_mortem_lessons}"
