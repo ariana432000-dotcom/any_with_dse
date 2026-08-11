@@ -659,8 +659,28 @@ At the very end, output a Markdown table with EXACTLY these 5 columns:
         pos = sum(1 for s in sentiments if "POSITIVE" in s.upper())
         neg = sum(1 for s in sentiments if "NEGATIVE" in s.upper())
         neu = sum(1 for s in sentiments if "NEUTRAL" in s.upper())
-        overall_m = re.search(r"(POSITIVE|NEGATIVE|NEUTRAL|BULLISH|BEARISH)", report, re.IGNORECASE)
-        overall = overall_m.group(1).upper() if overall_m else "NEUTRAL"
+        # 🔴 FIXED: `overall` used to come from
+        # re.search(r"(POSITIVE|NEGATIVE|NEUTRAL|BULLISH|BEARISH)", report)
+        # -- a first-match-anywhere scan of the ENTIRE free-form report
+        # (Company News Summary / Global Macro Trends / Sentiment
+        # Assessment / Key Risks, not just the table), completely
+        # disconnected from the pos/neg/neu counts computed right above
+        # it. A genuinely tied 2/2/2 headline split could -- and did --
+        # come out "NEGATIVE" just because that word happened to appear
+        # earliest in the prose, with zero relationship to the actual
+        # tally. Worse, the Sentiment Analyst downstream (which receives
+        # this value as "the News Analyst's overall read") would then
+        # construct a plausible-sounding post-hoc justification for why a
+        # balanced split "actually" leans negative -- confabulating a
+        # rationale for what was really just an extraction artifact. Now
+        # derived directly from the counts: strict majority wins, any tie
+        # (including 2/2/2) or neutral-dominant resolves to NEUTRAL.
+        if pos > neg and pos > neu:
+            overall = "POSITIVE"
+        elif neg > pos and neg > neu:
+            overall = "NEGATIVE"
+        else:
+            overall = "NEUTRAL"
         tbl_m = re.search(r"(\|.*?Category.*?\|.*?(?:\n\|[-| ]+\|)(?:\n\|.*?\|)+)", report, re.IGNORECASE | re.DOTALL)
 
         news_metrics = {
@@ -759,11 +779,26 @@ At the very end, output a Markdown table with EXACTLY these columns:
 
         score_m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*10", report)
         conf_m = re.search(r"(High|Medium|Low)\s*[Cc]onfidence", report)
-        overall_m = re.search(r"(BULLISH|BEARISH|NEUTRAL|POSITIVE|NEGATIVE)", report, re.IGNORECASE)
+        # 🔴 FIXED: same disconnected-first-match issue as News Analyst's
+        # overall_sentiment (see that fix's comment) -- this used to be
+        # re.search(r"(BULLISH|BEARISH|NEUTRAL|POSITIVE|NEGATIVE)", report),
+        # unrelated to the score this analyst itself computed on a 1-10
+        # scale (5=neutral, per this prompt's own "Score Breakdown"
+        # instruction). Now derived from that score directly -- the two
+        # can no longer disagree with each other.
+        score_val = float(score_m.group(1)) if score_m else None
+        if score_val is None:
+            overall = "NEUTRAL"
+        elif score_val >= 6:
+            overall = "POSITIVE"
+        elif score_val <= 4:
+            overall = "NEGATIVE"
+        else:
+            overall = "NEUTRAL"
         sentiment_metrics = {
             "score": score_m.group(1) if score_m else "N/A",
             "confidence": conf_m.group(1) if conf_m else "N/A",
-            "overall": overall_m.group(1).upper() if overall_m else "NEUTRAL",
+            "overall": overall,
         }
         # Numeric confidence (used by the agent-card UI, separate from the
         # High/Medium/Low label above): starts from whether a real
