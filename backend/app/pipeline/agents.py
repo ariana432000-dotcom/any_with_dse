@@ -57,6 +57,17 @@ def _text_confidence(text: str, target_chars: int, weight: float = 1.0) -> float
     return weight * min(1.0, len(text) / max(target_chars, 1))
 
 
+def _last_turn(history: str) -> str:
+    """Last non-empty line of a debate history string -- mirrors
+    runner.py's own copy (kept separate rather than imported, since
+    runner.py imports this module, not the other way around). Used by
+    create_bull_researcher/create_bear_researcher below to read the
+    opponent's most recent turn by name (bull_history/bear_history)
+    instead of a shared, order-dependent field."""
+    parts = [p for p in history.split("\n") if p.strip()]
+    return parts[-1] if parts else ""
+
+
 def extract_final_proposal(report_text: str) -> str:
     """Pulls the FINAL TRANSACTION PROPOSAL verdict out of a report so it
     survives truncation elsewhere (reports get sliced to a few hundred chars
@@ -800,6 +811,15 @@ def create_bull_researcher(llm):
     def node(state):
         ds = state["investment_debate_state"]
         market, sentiment, news, fundamentals = _reports(state)
+        # 🔴 FIXED: used to read ds['current_response'] -- a single shared
+        # field that only correctly means "the Bear's last argument" if
+        # Bear is *guaranteed* to have spoken most recently, i.e. only
+        # under the old fixed Bull-always-first-Bear-always-second order.
+        # Now reads the Bear's own last turn directly from bear_history by
+        # name, so it's correct regardless of which side actually spoke
+        # last -- a prerequisite for safely alternating speaking order
+        # below (see runner.py's investment debate loop comment).
+        last_bear_argument = _last_turn(ds.get("bear_history", ""))
         prompt = f"""IMPORTANT: Use ONLY the data in the reports below. Do NOT invent facts or figures.
 You are a Bull Analyst advocating for investing in the stock.
 Market report: {market}
@@ -807,7 +827,7 @@ Sentiment report: {sentiment}
 News report: {news}
 Fundamentals report: {fundamentals}
 Debate history: {ds.get('history', '')}
-Last bear argument: {ds.get('current_response', '')}
+Last bear argument: {last_bear_argument}
 Present a compelling bull argument with specific growth opportunities and strengths.
 """ + U["get_language_instruction"]()
         argument = f"Bull Analyst: {invoke_llm_with_retry(llm, prompt).content}"
@@ -828,6 +848,10 @@ def create_bear_researcher(llm):
     def node(state):
         ds = state["investment_debate_state"]
         market, sentiment, news, fundamentals = _reports(state)
+        # 🔴 FIXED: same fix as create_bull_researcher above, mirrored --
+        # reads Bull's last turn from bull_history by name instead of the
+        # generic current_response field.
+        last_bull_argument = _last_turn(ds.get("bull_history", ""))
         prompt = f"""IMPORTANT: Use ONLY the data in the reports below. Do NOT invent facts or figures.
 You are a Bear Analyst making the case against investing in the stock.
 Market report: {market}
@@ -835,7 +859,7 @@ Sentiment report: {sentiment}
 News report: {news}
 Fundamentals report: {fundamentals}
 Debate history: {ds.get('history', '')}
-Last bull argument: {ds.get('current_response', '')}
+Last bull argument: {last_bull_argument}
 Present a compelling bear argument with specific risks and weaknesses.
 """ + U["get_language_instruction"]()
         argument = f"Bear Analyst: {invoke_llm_with_retry(llm, prompt).content}"
