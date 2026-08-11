@@ -1723,16 +1723,31 @@ Be concise and only flag REAL, severe discrepancies -- do not invent problems.
 
 def run_decision_verifier(final_decision_text: str, indicators: dict, fund_metrics: dict,
                           news_metrics: dict, fundamentals_report: str, llm,
-                          is_dse: bool = False, log=print) -> dict:
+                          is_dse: bool = False, log=print,
+                          debate_texts: dict[str, str] | None = None) -> dict:
     """Runs all three checks and returns VERIFIED/FLAGGED status.
+
+    🔴 FIXED: the deterministic numeric-contradiction check used to only
+    ever look at `final_decision_text` (the Portfolio Manager's own
+    output) -- a wrong RSI/MACD/P-E/EPS figure cited earlier, in the
+    Bull/Bear debate, the Trader's proposal, or the Risk debate, went
+    completely unchecked at every stage unless that exact wrong number
+    happened to get repeated verbatim in the PM's final text. `debate_texts`
+    (optional dict of {stage_name: stage_text}, passed from
+    create_decision_verifier below) now gets the same deterministic,
+    non-LLM check applied to each stage individually, so a hallucinated
+    number anywhere upstream is caught and attributed to the stage that
+    produced it -- not just silently invisible unless it survived to the
+    final call. Same severity tier as the final-text check (pure Python
+    arithmetic, no LLM judgment involved), so it can also flag status.
 
     ✅ CHANGED (per explicit request): the rule-based fundamentals-
     contradiction check is now advisory-only, same as the LLM semantic
     check -- still computed and shown in `notes` for transparency, but it
     no longer flips `status` to FLAGGED and no longer auto-overrides
     `effective_signal` to HOLD. Only the deterministic numeric-
-    contradiction check and the LLM call itself failing/not following the
-    expected format can flag status now. If you want the old
+    contradiction check(s) and the LLM call itself failing/not following
+    the expected format can flag status now. If you want the old
     contradiction-blocks-the-trade behavior back, that's a one-line
     revert: re-add `rule_warnings` to the `status =` line below and
     restore the auto-override block that used to follow it (see git
@@ -1752,6 +1767,21 @@ def run_decision_verifier(final_decision_text: str, indicators: dict, fund_metri
     numeric_mismatches, numeric_checked = check_numeric_contradiction(
         final_decision_text, indicators, fund_metrics, skip_eps=is_dse)
 
+    # 🔴 FIXED (see this function's docstring): also check numbers cited
+    # in earlier pipeline stages, not just the final PM text. Each stage
+    # is checked and reported separately so a mismatch is attributable to
+    # where it actually happened (e.g. "[Bull vs Bear Debate]" vs
+    # "[Trader Proposal]"), rather than one undifferentiated blob.
+    debate_mismatches: list[str] = []
+    debate_checked = 0
+    for stage_name, stage_text in (debate_texts or {}).items():
+        if not stage_text:
+            continue
+        stage_mismatches, stage_checked = check_numeric_contradiction(
+            stage_text, indicators, fund_metrics, skip_eps=is_dse)
+        debate_checked += stage_checked
+        debate_mismatches.extend(f"[{stage_name}] {m}" for m in stage_mismatches)
+
     log("running advisory LLM semantic check")
     llm_notes = llm_signal_consistency_check(final_decision_text, llm)
 
@@ -1760,10 +1790,13 @@ def run_decision_verifier(final_decision_text: str, indicators: dict, fund_metri
     markers_missing = signal_consistent_m is None
 
     # Status is decided only by hard/reliable signals: code-verified
-    # numeric mismatch, or the LLM call failing/not following the format.
-    # Both the rule-based fundamentals-contradiction check AND the LLM's
-    # own SIGNAL_CONSISTENT opinion are advisory and never flip status.
-    status = "FLAGGED" if (numeric_mismatches or llm_call_failed or markers_missing) else "VERIFIED"
+    # numeric mismatch (final text OR any earlier debate stage -- both are
+    # the same pure-Python arithmetic check, no LLM judgment involved), or
+    # the LLM call failing/not following the format. The rule-based
+    # fundamentals-contradiction check AND the LLM's own SIGNAL_CONSISTENT
+    # opinion remain advisory and never flip status.
+    status = "FLAGGED" if (numeric_mismatches or debate_mismatches
+                            or llm_call_failed or markers_missing) else "VERIFIED"
 
     notes_parts = []
     if rule_warnings:
@@ -1785,6 +1818,20 @@ def run_decision_verifier(final_decision_text: str, indicators: dict, fund_metri
         notes_parts.append(
             "Numeric check (code, non-LLM): decision text didn't cite specific "
             "RSI/MACD/P-E/EPS figures, so there was nothing to compare against raw data.")
+    if debate_texts:
+        if debate_mismatches:
+            notes_parts.append(
+                "Numeric check — earlier pipeline stages (code, non-LLM): "
+                + " | ".join(debate_mismatches))
+        elif debate_checked:
+            notes_parts.append(
+                f"Numeric check — earlier pipeline stages (code, non-LLM): "
+                f"{debate_checked} cited figure(s) across the debate/proposal stages "
+                f"compared against raw data — all within tolerance.")
+        else:
+            notes_parts.append(
+                "Numeric check — earlier pipeline stages (code, non-LLM): no "
+                "RSI/MACD/P-E/EPS figures cited in the debate/proposal stages to compare.")
     notes_parts.append("LLM semantic check (advisory, does NOT affect status): " + llm_notes)
     notes = "\n".join(notes_parts)
 
@@ -1812,9 +1859,21 @@ def create_decision_verifier(llm, log=print):
         fundamentals_report = state.get("fundamentals_report", "")
         from tradingagents.dataflows.symbol_utils import is_dse_ticker
         is_dse = is_dse_ticker(state.get("company_of_interest", ""))
+        # 🔴 FIXED: previously only final_text got numerically verified --
+        # see run_decision_verifier's docstring. Pulls each earlier stage's
+        # own text so a wrong RSI/MACD/P-E/EPS figure anywhere upstream
+        # (not just in the PM's final wording) gets caught and attributed
+        # to its source stage.
+        debate_texts = {
+            "Bull vs Bear Debate": state.get("investment_debate_state", {}).get("history", ""),
+            "Investment Facilitator": state.get("investment_facilitator_decision", ""),
+            "Trader Proposal": str(state.get("trader_investment_plan", "")),
+            "Risk Debate": state.get("risk_debate_state", {}).get("history", ""),
+            "Risk Facilitator": state.get("risk_facilitator_decision", ""),
+        }
         result = run_decision_verifier(
             final_text, indicators, fund_metrics, news_metrics, fundamentals_report,
-            llm, is_dse=is_dse, log=log)
+            llm, is_dse=is_dse, log=log, debate_texts=debate_texts)
         return {"verification_result": result}
 
     return node
