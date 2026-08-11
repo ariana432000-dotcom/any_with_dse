@@ -244,14 +244,34 @@ class PipelineRunner:
         bull = agents.create_bull_researcher(llm)
         bear = agents.create_bear_researcher(llm)
         for r in range(1, self.investment_rounds + 1):
-            out = bull(self.state); self.state.update(out)
-            yield {"type": "debate_turn", "stage": "investment_debate", "speaker": "Bull Analyst",
-                   "side": "bull", "round": r,
-                   "html": md_to_html(_last_turn(out["investment_debate_state"]["bull_history"]))}
-            out = bear(self.state); self.state.update(out)
-            yield {"type": "debate_turn", "stage": "investment_debate", "speaker": "Bear Analyst",
-                   "side": "bear", "round": r,
-                   "html": md_to_html(_last_turn(out["investment_debate_state"]["bear_history"]))}
+            # 🔴 FIXED: Bull spoke first and Bear spoke second in every
+            # single round -- confirmed (across many tickers) to
+            # correlate with Bear winning the debate almost every time,
+            # regardless of the stock's actual fundamentals. This isn't
+            # just the judge's recency bias (already addressed via the
+            # Investment Facilitator's "structural note" prompt) -- it's
+            # a real informational asymmetry: whoever speaks second gets
+            # to read and specifically target the other side's actual
+            # argument, which the first speaker never gets to do for that
+            # round. Alternating who leads (odd rounds: Bull first, even
+            # rounds: Bear first) means each side gets that second-mover
+            # advantage roughly equally often across a multi-round debate
+            # instead of one side having it in literally every round.
+            # Requires create_bull_researcher/create_bear_researcher to
+            # read the opponent's last turn by name (bear_history/
+            # bull_history) rather than the old shared current_response
+            # field, which only meant the right thing under the old fixed
+            # order -- see agents.py's version of this fix.
+            bull_first = (r % 2 == 1)
+            speakers = [(bull, "Bull Analyst", "bull", "bull_history"),
+                        (bear, "Bear Analyst", "bear", "bear_history")]
+            if not bull_first:
+                speakers = list(reversed(speakers))
+            for fn, name, side, hist_key in speakers:
+                out = fn(self.state); self.state.update(out)
+                yield {"type": "debate_turn", "stage": "investment_debate", "speaker": name,
+                       "side": side, "round": r,
+                       "html": md_to_html(_last_turn(out["investment_debate_state"][hist_key]))}
         final_debate = self.state["investment_debate_state"]
         debate_input = {
             "fundamentals_report": str(self.state.get("fundamentals_report", ""))[:300],
@@ -396,16 +416,33 @@ class PipelineRunner:
         agg = agents.create_aggressive_debator(llm)
         con = agents.create_conservative_debator(llm)
         neu = agents.create_neutral_debator(llm)
+        # 🔴 FIXED: Aggressive, then Conservative, then Neutral -- in that
+        # exact order, every single round -- so Neutral always got the
+        # same second-mover (well, third-mover) informational advantage
+        # discussed in the investment-debate fix above, and confirmed
+        # (across many tickers) to correlate with Neutral winning almost
+        # every risk debate regardless of the actual risk picture. The
+        # per-debater prompts already read each other's response by name
+        # (current_aggressive_response / current_conservative_response /
+        # current_neutral_response, not a shared order-dependent field),
+        # so rotating the call order is safe with no other changes needed.
+        # With the default risk_rounds=3, this rotation gives each side
+        # the last-word slot exactly once across the full debate instead
+        # of Neutral having it in every round.
+        speaker_fns = {
+            "aggressive": (agg, "Aggressive", "current_aggressive_response"),
+            "conservative": (con, "Conservative", "current_conservative_response"),
+            "neutral": (neu, "Neutral", "current_neutral_response"),
+        }
+        order_cycle = ["aggressive", "conservative", "neutral"]
         for r in range(1, self.risk_rounds + 1):
-            out = agg(self.state); self.state.update(out)
-            yield {"type": "debate_turn", "stage": "risk_debate", "speaker": "Aggressive", "side": "aggressive",
-                   "round": r, "html": md_to_html(_strip(out["risk_debate_state"]["current_aggressive_response"]))}
-            out = con(self.state); self.state.update(out)
-            yield {"type": "debate_turn", "stage": "risk_debate", "speaker": "Conservative", "side": "conservative",
-                   "round": r, "html": md_to_html(_strip(out["risk_debate_state"]["current_conservative_response"]))}
-            out = neu(self.state); self.state.update(out)
-            yield {"type": "debate_turn", "stage": "risk_debate", "speaker": "Neutral", "side": "neutral",
-                   "round": r, "html": md_to_html(_strip(out["risk_debate_state"]["current_neutral_response"]))}
+            offset = (r - 1) % len(order_cycle)
+            rotation = order_cycle[offset:] + order_cycle[:offset]
+            for key in rotation:
+                fn, name, resp_key = speaker_fns[key]
+                out = fn(self.state); self.state.update(out)
+                yield {"type": "debate_turn", "stage": "risk_debate", "speaker": name, "side": key,
+                       "round": r, "html": md_to_html(_strip(out["risk_debate_state"][resp_key]))}
         final_risk = self.state["risk_debate_state"]
         risk_debate_input = {
             "trader_decision": self.state.get("trader_investment_plan", "")[:300],
