@@ -299,8 +299,28 @@ def create_fundamentals_analyst(llm, log=print):
                 sma_raw = str(U["get_indicators"].invoke({
                     "symbol": company, "indicator": "close_50_sma", "curr_date": current_date,
                 }))
-                m_sma = re.search(r"(-?[\d,]+\.?\d*)", sma_raw)
-                sma50_val = m_sma.group(1).replace(",", "") if m_sma else "N/A"
+                # 🔴 FIXED: the old `re.search(r"(-?[\d,]+\.?\d*)", sma_raw)`
+                # matched the FIRST number anywhere in the raw string --
+                # which is the "50" embedded in the tool's own header line
+                # ("## close_50_sma values from..."), not any real price.
+                # That header always comes before the actual per-date value
+                # lines, so this silently returned the literal digits from
+                # the indicator's *name* every single time, regardless of
+                # the stock's actual SMA (confirmed live: a report showing
+                # "50-Day SMA: 50" for a stock trading near ৳240-250 --
+                # off by roughly the entire price of the stock). Anchoring
+                # on the "YYYY-MM-DD: value" line format (same pattern the
+                # Market Analyst's own indicator parsing already uses
+                # below) skips the header/trailing note entirely and reads
+                # the real value from the most recent dated line.
+                sma50_val = "N/A"
+                for line in sma_raw.split("\n"):
+                    line = line.strip()
+                    if re.match(r"\d{4}-\d{2}-\d{2}:", line) and "N/A" not in line:
+                        m_sma = re.search(r":\s*(-?[\d,]+\.?\d*)", line)
+                        if m_sma:
+                            sma50_val = m_sma.group(1).replace(",", "")
+                        break
             except Exception:  # noqa: BLE001
                 sma50_val = "N/A"
 
