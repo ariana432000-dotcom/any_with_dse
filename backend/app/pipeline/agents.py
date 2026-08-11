@@ -1622,11 +1622,20 @@ def _extract_cited_number(text: str, label_patterns: list[str]) -> float | None:
 
 
 def check_numeric_contradiction(final_decision_text: str, indicators: dict,
-                                fund_metrics: dict, skip_eps: bool = False) -> list[str]:
+                                fund_metrics: dict, skip_eps: bool = False) -> tuple[list[str], int]:
     """Compares every number the decision text cites against the raw
     ground-truth value, with a generous rounding tolerance (2% relative or
     0.5 absolute) so "same number, fewer decimals" is never confused with a
     genuinely wrong figure. Pure Python — no LLM arithmetic judgment.
+
+    🔴 FIXED: now also returns `n_checked` (how many tracked figures the
+    decision text actually cited and got compared), not just the list of
+    mismatches. Previously the caller only ever surfaced this function's
+    output when `mismatches` was non-empty (see run_decision_verifier's
+    notes-building) -- so "every cited number matched" and "the decision
+    text never cited any of these figures at all" produced IDENTICAL
+    silence in the UI, with no way to tell a genuine numeric verification
+    apart from nothing having been checked in the first place.
 
     ✅ CHANGED: `skip_eps` -- confirmed live (BATBC) that DSE tickers
     routinely have SEVERAL simultaneously-valid, genuinely-different EPS
@@ -1651,6 +1660,7 @@ def check_numeric_contradiction(final_decision_text: str, indicators: dict,
     if not skip_eps:
         checks.append(("EPS (TTM)", [r"EPS \(TTM\)", "EPS"], fund_metrics.get("eps_ttm")))
     mismatches = []
+    n_checked = 0
     for label, patterns, raw in checks:
         if raw in (None, "", "N/A"):
             continue
@@ -1661,6 +1671,7 @@ def check_numeric_contradiction(final_decision_text: str, indicators: dict,
         cited = _extract_cited_number(final_decision_text, patterns)
         if cited is None:
             continue
+        n_checked += 1
         diff = abs(cited - raw_val)
         tolerance = max(0.5, 0.02 * abs(raw_val))
         if diff > tolerance:
@@ -1668,7 +1679,7 @@ def check_numeric_contradiction(final_decision_text: str, indicators: dict,
                 f"{label}: decision text says {cited}, raw data says {raw_val} "
                 f"(diff={diff:.2f}, tolerance={tolerance:.2f}) — possible genuine mismatch."
             )
-    return mismatches
+    return mismatches, n_checked
 
 
 def llm_signal_consistency_check(final_decision_text: str, llm) -> str:
@@ -1738,7 +1749,7 @@ def run_decision_verifier(final_decision_text: str, indicators: dict, fund_metri
         final_signal, indicators, news_metrics, fundamentals_report=fundamentals_report)
 
     log("running deterministic numeric-contradiction check")
-    numeric_mismatches = check_numeric_contradiction(
+    numeric_mismatches, numeric_checked = check_numeric_contradiction(
         final_decision_text, indicators, fund_metrics, skip_eps=is_dse)
 
     log("running advisory LLM semantic check")
@@ -1759,8 +1770,21 @@ def run_decision_verifier(final_decision_text: str, indicators: dict, fund_metri
         notes_parts.append("Rule-based (advisory, does NOT affect status): " + " | ".join(rule_warnings))
     if rule_info_notes:
         notes_parts.append("Rule-based (info, non-flagging): " + " | ".join(rule_info_notes))
+    # 🔴 FIXED: this used to only ever add a line when mismatches were
+    # found -- "every cited figure matched" and "the decision text cited
+    # no RSI/MACD/P-E/EPS figures at all" both produced total silence
+    # here, indistinguishable from each other. Now always reports what
+    # actually happened.
     if numeric_mismatches:
         notes_parts.append("Numeric check (code, non-LLM): " + " | ".join(numeric_mismatches))
+    elif numeric_checked:
+        notes_parts.append(
+            f"Numeric check (code, non-LLM): {numeric_checked} cited figure(s) "
+            f"(RSI/MACD/P-E/EPS) compared against raw data — all within tolerance.")
+    else:
+        notes_parts.append(
+            "Numeric check (code, non-LLM): decision text didn't cite specific "
+            "RSI/MACD/P-E/EPS figures, so there was nothing to compare against raw data.")
     notes_parts.append("LLM semantic check (advisory, does NOT affect status): " + llm_notes)
     notes = "\n".join(notes_parts)
 
