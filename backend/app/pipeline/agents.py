@@ -269,6 +269,22 @@ def create_fundamentals_analyst(llm, log=print):
             eps_val = g_dse(["eps"], fund, exclude=("change", "p/e", "ratio"))
             mcap_val = g_dse(["market capitalization", "market cap"], fund)
             div_val = g_dse(["dividend"], fund)
+            # 🔴 FIXED: the DSE data_summary handed to this analyst had NO
+            # actual current/last-traded price field at all -- only P/E,
+            # EPS, and the 50-Day SMA. Confirmed live: without a real
+            # price to reference, the LLM would back-derive one via
+            # P/E x EPS (e.g. 23.12 x 7.65 ~= 176.87) to have *something*
+            # to call "the current price" when discussing valuation --
+            # sometimes correctly caveating it as a derived/implied
+            # figure, sometimes not, treating it as the actual trading
+            # price and drawing a false "price is below its 50-day
+            # average" conclusion from comparing that implied number
+            # against the real SMA. dsebd.org's snapshot already carries
+            # this field (confirmed: "last trading price"/"closing price"
+            # are already in wanted_keywords, just never extracted here)
+            # -- pulling it directly removes the LLM's reason to ever
+            # derive one.
+            price_val = g_dse(["last trading price", "closing price"], fund)
             # ✅ CHANGED: dsebd.org's page doesn't publish a computed
             # dividend *yield* (dividend / current price) -- the "dividend"
             # line this matches is the last-declared cash dividend
@@ -409,6 +425,7 @@ def create_fundamentals_analyst(llm, log=print):
 COMPANY: {company} | DATE: {current_date}
 
 MARKET DATA:
+- Current Price (last traded): {price_val}
 - Market Cap: {mcap_val}
 - P/E Ratio: {pe_val}
 - EPS: {eps_val}
@@ -477,6 +494,12 @@ RULES:
   conflicting (e.g. strong profitability but rising debt, or a cheap P/E
   alongside deteriorating cash flow) -- not merely incomplete. "I don't
   have every field" is not a basis for HOLD on its own.
+- Use the given "Current Price" figure as-is whenever you reference the
+  stock's price (e.g. comparing to the 50-Day SMA). Do NOT derive a
+  price from P/E x EPS or any other combination -- that produces a
+  theoretical, not the actual traded, price and the two should never be
+  conflated. If "Current Price" itself is N/A, say price data isn't
+  available rather than computing a substitute.
 
 {data_summary}
 """ + U["get_language_instruction"]()
