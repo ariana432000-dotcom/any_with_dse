@@ -1610,15 +1610,48 @@ def _extract_cited_number(text: str, label_patterns: list[str]) -> float | None:
     uses the strict label+colon form, so a stricter pattern here would make
     this check silently never fire in practice. The <=20-char gap cap keeps
     it from skipping past to an unrelated number further down the text.
+
+    🔴 FIXED: the gap class used to be `[^0-9\\-]` — any non-digit,
+    non-minus character, INCLUDING sentence-ending punctuation. Because
+    `re.search` doesn't stop at the label's first occurrence, it just finds
+    the first STARTING POSITION where the whole pattern matches — a label
+    mention with no number in its own clause (e.g. "RSI reflects oversold
+    conditions.") would fail to match at that position and the engine would
+    keep sliding forward, happily crossing the period into a completely
+    unrelated later clause/sentence ("...analysts still see a 40% chance of
+    further downside") and grabbing THAT number instead, mislabeling it as
+    the RSI citation. Confirmed live: this produced "RSI: -40.0" and
+    "MACD: -50.0" mismatches in multi-round debate history and reasoning
+    text where the actual indicator was never mislabeled by the LLM at all
+    — the extractor had just walked into an unrelated clause. Excluding
+    `.!?\\n` from the gap keeps the match inside the same clause/sentence as
+    the label, so a label with no number of its own now correctly yields
+    no match instead of borrowing a stranger's number.
     """
     for label in label_patterns:
-        m = re.search(rf"{label}\b(?:\s*\([^)]*\))?[^0-9\-]{{0,20}}(-?\d+\.?\d*)", text, re.IGNORECASE)
+        m = re.search(rf"{label}\b(?:\s*\([^)]*\))?[^0-9\-.!?\n]{{0,20}}(-?\d+\.?\d*)", text, re.IGNORECASE)
         if m:
             try:
                 return float(m.group(1))
             except ValueError:
                 continue
     return None
+
+
+# 🔴 FIXED: physically-impossible bounds catch the residual cases the
+# sentence-boundary fix above doesn't -- e.g. the label and the stray
+# number DO share a clause ("...RSI momentum has weakened by roughly -40%
+# over the period..."). RSI is mathematically bounded to [0, 100] by its
+# own formula (100 - 100/(1+RS)); a "citation" outside that range cannot be
+# a genuine RSI reading no matter how it was extracted, so treating it as
+# "not actually a citation" (skip) rather than "a wrong citation" (flag)
+# avoids a false mismatch built on a number that was never really an RSI
+# value to begin with. MACD has no equivalent hard mathematical bound, so
+# it isn't included here -- suspiciously large MACD mismatches still need
+# a human/log check to confirm, see run notes.
+_INDICATOR_BOUNDS = {
+    "RSI": (0.0, 100.0),
+}
 
 
 def check_numeric_contradiction(final_decision_text: str, indicators: dict,
@@ -1670,6 +1703,13 @@ def check_numeric_contradiction(final_decision_text: str, indicators: dict,
             continue
         cited = _extract_cited_number(final_decision_text, patterns)
         if cited is None:
+            continue
+        bounds = _INDICATOR_BOUNDS.get(label)
+        if bounds is not None and not (bounds[0] <= cited <= bounds[1]):
+            # Physically impossible for this indicator (e.g. RSI < 0) --
+            # the extractor almost certainly grabbed an unrelated nearby
+            # number (a %, a score, a threshold), not a genuine citation.
+            # Don't count it as checked or as a mismatch either way.
             continue
         n_checked += 1
         diff = abs(cited - raw_val)
