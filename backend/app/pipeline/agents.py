@@ -1600,9 +1600,9 @@ def rule_based_checks(final_signal: str, indicators: dict, news_metrics: dict,
     return warnings, info_notes
 
 
-def _extract_cited_number(text: str, label_patterns: list[str]) -> float | None:
-    """Finds the number written near a label (e.g. "RSI") in the decision
-    text. First match wins.
+def _extract_cited_numbers(text: str, label_patterns: list[str]) -> list[float]:
+    """Finds EVERY number written near a label (e.g. "RSI") in the decision
+    text, across all occurrences of the label -- not just the first.
 
     Tolerates natural-language connectors between the label and the number
     (e.g. "RSI at 68.17", "RSI is currently 68.17", "RSI stands at 68.17"),
@@ -1620,22 +1620,31 @@ def _extract_cited_number(text: str, label_patterns: list[str]) -> float | None:
     keep sliding forward, happily crossing the period into a completely
     unrelated later clause/sentence ("...analysts still see a 40% chance of
     further downside") and grabbing THAT number instead, mislabeling it as
-    the RSI citation. Confirmed live: this produced "RSI: -40.0" and
-    "MACD: -50.0" mismatches in multi-round debate history and reasoning
-    text where the actual indicator was never mislabeled by the LLM at all
-    — the extractor had just walked into an unrelated clause. Excluding
-    `.!?\\n` from the gap keeps the match inside the same clause/sentence as
-    the label, so a label with no number of its own now correctly yields
-    no match instead of borrowing a stranger's number.
+    the RSI citation. Excluding `.!?\\n` from the gap keeps the match inside
+    the same clause/sentence as the label.
+
+    🔴 FIXED (2): used to be "first match wins" and returned a single
+    float. Fine for a short final-decision text, but WRONG for multi-round
+    debate history ("Bull vs Bear Debate" concatenates every round) and any
+    text where a label is mentioned more than once -- the label's genuine,
+    correct citation might sit in round 3 while an earlier round used the
+    word rhetorically/hypothetically with some unrelated nearby number
+    ("if RSI were to slip toward 20, that would signal capitulation") that
+    the old first-match logic would grab instead, even though a completely
+    correct citation existed elsewhere in the same text. Now returns every
+    candidate found across every occurrence of every pattern, so the caller
+    can pick the one that actually matches the real reading (see
+    check_numeric_contradiction) instead of committing to whichever mention
+    the regex happened to reach first.
     """
+    found: list[float] = []
     for label in label_patterns:
-        m = re.search(rf"{label}\b(?:\s*\([^)]*\))?[^0-9\-.!?\n]{{0,20}}(-?\d+\.?\d*)", text, re.IGNORECASE)
-        if m:
+        for m in re.finditer(rf"{label}\b(?:\s*\([^)]*\))?[^0-9\-.!?\n]{{0,20}}(-?\d+\.?\d*)", text, re.IGNORECASE):
             try:
-                return float(m.group(1))
+                found.append(float(m.group(1)))
             except ValueError:
                 continue
-    return None
+    return found
 
 
 # 🔴 FIXED: physically-impossible bounds catch the residual cases the
@@ -1701,16 +1710,28 @@ def check_numeric_contradiction(final_decision_text: str, indicators: dict,
             raw_val = float(raw)
         except (TypeError, ValueError):
             continue
-        cited = _extract_cited_number(final_decision_text, patterns)
-        if cited is None:
-            continue
+        candidates = _extract_cited_numbers(final_decision_text, patterns)
         bounds = _INDICATOR_BOUNDS.get(label)
-        if bounds is not None and not (bounds[0] <= cited <= bounds[1]):
+        if bounds is not None:
             # Physically impossible for this indicator (e.g. RSI < 0) --
             # the extractor almost certainly grabbed an unrelated nearby
             # number (a %, a score, a threshold), not a genuine citation.
-            # Don't count it as checked or as a mismatch either way.
+            # Drop these before picking a "best" candidate so an implausible
+            # number never wins by being numerically closer to raw_val.
+            candidates = [c for c in candidates if bounds[0] <= c <= bounds[1]]
+        if not candidates:
             continue
+        # 🔴 FIXED: used to take whichever single number the old
+        # first-match extractor happened to find. For text with multiple
+        # mentions of the label (multi-round debate history above all),
+        # that could be a rhetorical/hypothetical mention rather than the
+        # genuine citation. Now: if ANY mention in the text matches the
+        # real reading within tolerance, that's the citation that counts --
+        # extra rhetorical noise elsewhere in the same text no longer
+        # produces a false mismatch. Only flag when EVERY mention found is
+        # off, reporting the closest of them as the representative (most
+        # charitable) wrong figure.
+        cited = min(candidates, key=lambda c: abs(c - raw_val))
         n_checked += 1
         diff = abs(cited - raw_val)
         tolerance = max(0.5, 0.02 * abs(raw_val))
@@ -1904,12 +1925,29 @@ def create_decision_verifier(llm, log=print):
         # own text so a wrong RSI/MACD/P-E/EPS figure anywhere upstream
         # (not just in the PM's final wording) gets caught and attributed
         # to its source stage.
+        # 🔴 FIXED: "Investment Facilitator" and "Risk Facilitator" used to
+        # be checked here too, but neither one is ever given the raw
+        # market_report/indicators directly -- Investment Facilitator's
+        # prompt only passes it the Bull/Bear debate history text
+        # (create_investment_facilitator), and Risk Facilitator's prompt
+        # only passes it the risk-debate summaries + trader plan
+        # (create_risk_facilitator). Both are pure SYNTHESIZERS one step
+        # removed from ground truth -- if an earlier debate round didn't
+        # restate the exact RSI/MACD figure in prose, these two have no way
+        # to cite it precisely and will reasonably paraphrase/approximate
+        # ("RSI weak, around 50") instead. Checking that paraphrase against
+        # raw_val was flagging a structural gap in what these two agents
+        # were ever given, not a real numeric error -- confirmed live via
+        # repeated plausible-but-wrong round numbers (50.0, -40.0, -70.0)
+        # from exactly these two stages across multiple tickers. "Bull vs
+        # Bear Debate", "Risk Debate", and "Trader Proposal" stay in the
+        # check below: their generating agents DO receive market_report /
+        # indicators directly (see _reports / _risk_reports), so a wrong
+        # figure there is a genuine citation error, not a data-access gap.
         debate_texts = {
             "Bull vs Bear Debate": state.get("investment_debate_state", {}).get("history", ""),
-            "Investment Facilitator": state.get("investment_facilitator_decision", ""),
             "Trader Proposal": str(state.get("trader_investment_plan", "")),
             "Risk Debate": state.get("risk_debate_state", {}).get("history", ""),
-            "Risk Facilitator": state.get("risk_facilitator_decision", ""),
         }
         result = run_decision_verifier(
             final_text, indicators, fund_metrics, news_metrics, fundamentals_report,
