@@ -1204,6 +1204,39 @@ def create_portfolio_manager(llm):
         past_context = state.get("past_context", "")
         investor_profile = state.get("investor_profile", "Aggressive")
 
+        # 🔴 FIXED: the Portfolio Manager -- the one stage whose numeric
+        # citations matter most, since it's the actual final decision --
+        # was never given the raw indicators/fund_metrics directly either,
+        # same gap as Investment/Risk Facilitator. It only ever saw
+        # whatever RSI/MACD figures survived the Trader plan / Risk
+        # Facilitator verdict / risk debate excerpt paraphrase chain, with
+        # no guarantee any of them restated the number precisely.
+        # Confirmed live: this produced a final decision citing "RSI: 40.0"
+        # when the actual raw RSI was 31.66. Unlike Investment/Risk
+        # Facilitator (pure debate judges, whose job doesn't require
+        # independent technical citation -- see run_decision_verifier's
+        # debate_texts comment), the Portfolio Manager's job explicitly IS
+        # to issue the final call, and citing exact levels is a normal,
+        # useful part of that -- so the fix here is to ground it with real
+        # data, not to exempt it from the check.
+        indicators = state.get("indicators_parsed", {})
+        fund_metrics = state.get("fund_metrics", {})
+        verified_lines = []
+        for key, label in (("rsi", "RSI"), ("macd", "MACD")):
+            val = indicators.get(key)
+            if isinstance(val, (int, float)):
+                verified_lines.append(f"{label}: {val:.2f}")
+        for key, label in (("pe_ratio", "P/E Ratio"), ("eps_ttm", "EPS (TTM)")):
+            val = fund_metrics.get(key)
+            if isinstance(val, (int, float)):
+                verified_lines.append(f"{label}: {val:.2f}")
+        verified_snapshot = (
+            "Verified Technical/Fundamental Readings (source of truth -- "
+            "if you cite any of these in your reasoning, use these exact "
+            "figures, not a paraphrase from the text below):\n"
+            + "\n".join(verified_lines)
+        ) if verified_lines else ""
+
         prompt_text = (
             f"You are the Portfolio Manager making the final investment decision for {company_name}. "
             f"{instrument_context}\n\n"
@@ -1217,6 +1250,8 @@ def create_portfolio_manager(llm):
             f"opinion):\n{risk_facilitator_decision[:800]}\n\n"
             f"Risk Analysts Debate (supporting detail):\n{risk_history[:1500]}\n\n"
         )
+        if verified_snapshot:
+            prompt_text += f"{verified_snapshot}\n\n"
         if past_context:
             prompt_text += f"Past context:\n{past_context}\n\n"
         prompt_text += get_language_instruction()
@@ -1662,9 +1697,23 @@ _INDICATOR_BOUNDS = {
     "RSI": (0.0, 100.0),
 }
 
+# 🔴 FIXED: MACD has no fixed mathematical bound like RSI's [0, 100], so it
+# can't use the same hard-range filter -- but a citation ~80x the raw
+# value's magnitude (e.g. "-50.0" cited when raw MACD is -0.625) is still
+# not a plausible reading for the SAME ticker/date; MACD doesn't jump
+# orders of magnitude between what an analyst sees and what a debater
+# paraphrases minutes later. This is a heuristic, not a hard proof, so the
+# cap is generous (15x, floor 3.0) -- meant to catch "clearly a different
+# number entirely" (a stray %, a score) without also swallowing genuine
+# moderate citation drift that's still worth flagging.
+_INDICATOR_RELATIVE_MAGNITUDE_CAP = {
+    "MACD": 15.0,
+}
+
 
 def check_numeric_contradiction(final_decision_text: str, indicators: dict,
-                                fund_metrics: dict, skip_eps: bool = False) -> tuple[list[str], int]:
+                                fund_metrics: dict, skip_eps: bool = False,
+                                tolerance_floor: float = 0.5) -> tuple[list[str], int]:
     """Compares every number the decision text cites against the raw
     ground-truth value, with a generous rounding tolerance (2% relative or
     0.5 absolute) so "same number, fewer decimals" is never confused with a
@@ -1693,7 +1742,19 @@ def check_numeric_contradiction(final_decision_text: str, indicators: dict,
     guess a looser tolerance, since no fixed tolerance is principled when
     the two numbers are correctly describing different reporting
     periods. RSI/MACD/P-E aren't affected -- those remain single-valued
-    for a given ticker+date."""
+    for a given ticker+date.
+
+    ✅ CHANGED: `tolerance_floor` -- the final decision text is a single,
+    authoritative, structured output and should be held to the tight
+    default (0.5 absolute / 2% relative). Earlier debate/proposal stages
+    are conversational prose written across multiple rounds by different
+    "voices" (bull/bear/aggressive/conservative/etc) synthesizing from
+    each other -- a little rounding drift when paraphrasing a figure
+    someone else stated two paragraphs up (e.g. RSI 31.66 restated as
+    ~30) is normal and not the kind of error this check exists to catch.
+    Callers checking debate_texts pass a wider floor so that small,
+    plausible drift doesn't compete for attention with genuine
+    mismatches. See run_decision_verifier for the two call sites."""
     checks = [
         ("RSI", ["RSI"], indicators.get("rsi")),
         ("MACD", ["MACD"], indicators.get("macd")),
@@ -1719,6 +1780,15 @@ def check_numeric_contradiction(final_decision_text: str, indicators: dict,
             # Drop these before picking a "best" candidate so an implausible
             # number never wins by being numerically closer to raw_val.
             candidates = [c for c in candidates if bounds[0] <= c <= bounds[1]]
+        mag_cap = _INDICATOR_RELATIVE_MAGNITUDE_CAP.get(label)
+        if mag_cap is not None:
+            # No hard bound exists (e.g. MACD can legitimately be any real
+            # number), but a citation dozens of times larger than the raw
+            # reading for the SAME ticker/date is still not a plausible
+            # same-indicator reading -- almost certainly a stray %/score
+            # the extractor picked up, not real drift.
+            cap = max(3.0, mag_cap * abs(raw_val))
+            candidates = [c for c in candidates if abs(c) <= cap]
         if not candidates:
             continue
         # 🔴 FIXED: used to take whichever single number the old
@@ -1734,7 +1804,7 @@ def check_numeric_contradiction(final_decision_text: str, indicators: dict,
         cited = min(candidates, key=lambda c: abs(c - raw_val))
         n_checked += 1
         diff = abs(cited - raw_val)
-        tolerance = max(0.5, 0.02 * abs(raw_val))
+        tolerance = max(tolerance_floor, 0.02 * abs(raw_val))
         if diff > tolerance:
             mismatches.append(
                 f"{label}: decision text says {cited}, raw data says {raw_val} "
@@ -1833,13 +1903,22 @@ def run_decision_verifier(final_decision_text: str, indicators: dict, fund_metri
     # is checked and reported separately so a mismatch is attributable to
     # where it actually happened (e.g. "[Bull vs Bear Debate]" vs
     # "[Trader Proposal]"), rather than one undifferentiated blob.
+    #
+    # ✅ CHANGED: `tolerance_floor=2.0` here (vs. the 0.5 default used for
+    # final_decision_text above) -- these are multi-round debate/proposal
+    # texts, not the single authoritative final call, and confirmed live
+    # (Risk Debate: RSI cited 30.05 vs raw 31.66, diff=1.61 against the
+    # tight 0.63 tolerance) that ordinary paraphrase drift when restating
+    # a figure mid-debate was competing for attention with genuine
+    # mismatches at the tight tolerance. The final decision text keeps the
+    # strict default since it's the one output that should be precise.
     debate_mismatches: list[str] = []
     debate_checked = 0
     for stage_name, stage_text in (debate_texts or {}).items():
         if not stage_text:
             continue
         stage_mismatches, stage_checked = check_numeric_contradiction(
-            stage_text, indicators, fund_metrics, skip_eps=is_dse)
+            stage_text, indicators, fund_metrics, skip_eps=is_dse, tolerance_floor=2.0)
         debate_checked += stage_checked
         debate_mismatches.extend(f"[{stage_name}] {m}" for m in stage_mismatches)
 
