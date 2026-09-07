@@ -43,6 +43,8 @@ bdshare>=1.2       # maintained DSE scraper: OHLCV, trading-code list, news, P/E
 beautifulsoup4>=4.12
 pdfplumber>=0.11
 anthropic>=0.34   # raw SDK call in dse_statement_extractor.py, separate from langchain-anthropic above
+statsmodels>=0.14  # ARIMA forecasting (app/pipeline/dsex_forecast.py, stock_forecast.py)
+matplotlib>=3.8    # chart rendering for the DSEX forecast (headless/Agg backend)
 # playwright>=1.45  # optional — only needed to run tools/discover_stocknow_api.py locally
 
 # ---- background worker (periodic watchlist refresh + background analysis) ----
