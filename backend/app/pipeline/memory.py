@@ -180,6 +180,80 @@ class RAEMMemory:
 
         return {"checked": len(ids), "fixed": len(fixed_ids), "details": fixed_details}
 
+    # -- forecast resolve -------------------------------------------------
+    def backfill_pending_forecasts(self, company: str, today_date: str) -> dict:
+        """Resolves PENDING forecasts (see build_episode_document's
+        forecast_* fields) whose own horizon has actually elapsed --
+        e.g. a 30-day-ahead forecast made on 2026-07-01 can only be
+        checked against reality on or after 2026-07-31, which is a much
+        longer wait than the 1-day minimum for the trade's own WIN/LOSS/
+        FLAT outcome (backfill_pending_outcomes above). The two are
+        deliberately independent: a trade can resolve (WIN/LOSS/FLAT)
+        long before its forecast's own horizon is up, and vice versa if
+        an episode's forecast_horizon_days is ever shorter than 1 (it
+        never is currently, but nothing here assumes otherwise).
+
+        Records forecast_error_pct = (actual - forecast) / actual * 100,
+        i.e. how far off the ARIMA point forecast was, as a signed
+        percentage -- see eval_metrics.py::forecast_accuracy() for how
+        this rolls up into a MAPE-style summary across episodes."""
+        self.connect()
+        try:
+            pending = self.episodic.get(
+                where={"$and": [{"company": company}, {"forecast_status": "PENDING"}]}
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"resolved": 0, "note": f"query error: {e}"}
+
+        if not pending["ids"]:
+            return {"resolved": 0, "note": "no pending forecasts"}
+
+        resolved, skipped_too_recent, details = 0, 0, []
+        for ep_id, meta in zip(pending["ids"], pending["metadatas"]):
+            ep_date = meta.get("trade_date", "")
+            horizon_days_raw = meta.get("forecast_horizon_days", "N/A")
+            try:
+                horizon_days = int(float(horizon_days_raw))
+            except (TypeError, ValueError):
+                continue  # malformed horizon -- nothing sensible to resolve against
+            try:
+                days_elapsed = (datetime.strptime(today_date, "%Y-%m-%d")
+                               - datetime.strptime(ep_date, "%Y-%m-%d")).days
+            except ValueError:
+                continue
+            if days_elapsed < horizon_days:
+                skipped_too_recent += 1
+                continue
+
+            actual_close = _fetch_latest_close(company, today_date)
+            if actual_close is None:
+                continue  # try again on a later run once price data is available
+
+            try:
+                forecast_price = float(meta.get("forecast_price", "N/A"))
+            except (TypeError, ValueError):
+                continue
+
+            error_pct = (actual_close - forecast_price) / actual_close * 100 if actual_close else None
+            meta = dict(meta)
+            meta.update({
+                "forecast_status": "RESOLVED",
+                "forecast_actual_price": str(round(actual_close, 2)),
+                "forecast_error_pct": str(round(error_pct, 2)) if error_pct is not None else "N/A",
+            })
+            self.episodic.update(ids=[ep_id], metadatas=[meta])
+            resolved += 1
+            details.append({"date": ep_date, "forecast_price": forecast_price,
+                            "actual_price": round(actual_close, 2),
+                            "error_pct": round(error_pct, 2) if error_pct is not None else None})
+
+        note = None
+        if resolved == 0 and skipped_too_recent > 0:
+            note = (f"{skipped_too_recent} pending forecast(s) for {company} exist but "
+                    f"their horizon hasn't elapsed yet.")
+        note = note or ("Nothing to backfill." if not details else None)
+        return {"resolved": resolved, "details": details, "note": note}
+
     # -- regime helpers ------------------------------------------------------
     def most_recent_regime(self, company: str, exclude_date: str | None = None):
         self.connect()
@@ -307,7 +381,9 @@ class RAEMMemory:
                      stock_data, macro_regime: str | None = None,
                      verifier_status: str | None = None,
                      llm_provider: str | None = None,
-                     run_key: str | None = None) -> dict:
+                     run_key: str | None = None,
+                     confidence: float | None = None,
+                     forecast_data: dict | None = None) -> dict:
         self.connect()
         # 🔴 FIXED: compute the id ONCE, here, and pass it into
         # build_episode_document() -- it needs the id too, for the
@@ -324,7 +400,8 @@ class RAEMMemory:
             company, trade_date, indicators, fund_metrics,
             news_metrics, sentiment_metrics, final_decision_text, stock_data,
             macro_regime=macro_regime, verifier_status=verifier_status,
-            llm_provider=llm_provider, ep_id=ep_id,
+            llm_provider=llm_provider, ep_id=ep_id, confidence=confidence,
+            forecast_data=forecast_data,
         )
         self.episodic.upsert(ids=[ep_id], documents=[doc], metadatas=[meta])
         return {"id": ep_id, "regime": meta["regime"], "signal": meta["final_signal"],
@@ -410,7 +487,9 @@ def build_episode_document(company, trade_date, indicators, fund_metrics,
                            stock_data, macro_regime: str | None = None,
                            verifier_status: str | None = None,
                            llm_provider: str | None = None,
-                           ep_id: str | None = None):
+                           ep_id: str | None = None,
+                           confidence: float | None = None,
+                           forecast_data: dict | None = None):
     import re
     regime = classify_regime(indicators)
     entry_price = None
@@ -473,6 +552,21 @@ Decision Rationale Summary: {final_decision_text[:400]}"""
         "exit_price": "N/A",
         "pnl_pct": "N/A",
         "outcome_label": "N/A",
+        # Per-stock ARIMA forecast (see app/pipeline/stock_forecast.py and
+        # the Forecast Analyst stage) -- tracked as its OWN pending/
+        # resolved cycle, separate from outcome_status above, because the
+        # forecast horizon (e.g. 30 days) is much longer than the 1-day
+        # minimum hold before a trade's own WIN/LOSS/FLAT can resolve.
+        # forecast_status stays "N/A" (never becomes PENDING) for any
+        # episode where the Forecast Analyst couldn't produce one (too
+        # little history -- see stock_forecast.py's own min-data guard).
+        "forecast_price": str(forecast_data.get("forecast_price")) if forecast_data and forecast_data.get("forecast_price") is not None else "N/A",
+        "forecast_lower": str(forecast_data.get("forecast_lower")) if forecast_data and forecast_data.get("forecast_lower") is not None else "N/A",
+        "forecast_upper": str(forecast_data.get("forecast_upper")) if forecast_data and forecast_data.get("forecast_upper") is not None else "N/A",
+        "forecast_horizon_days": str(forecast_data.get("horizon_days")) if forecast_data and forecast_data.get("horizon_days") is not None else "N/A",
+        "forecast_status": "PENDING" if (forecast_data and forecast_data.get("forecast_price") is not None) else "N/A",
+        "forecast_actual_price": "N/A",
+        "forecast_error_pct": "N/A",
         # For Kimi-vs-Sonnet (or any provider) comparison: which LLM actually
         # produced this trading decision, e.g. "anthropic:claude-sonnet-5" or
         # "kimi:kimi-k3" -- see app/pipeline/llm.py::provider_label(). Lets
@@ -498,7 +592,19 @@ Decision Rationale Summary: {final_decision_text[:400]}"""
         "agent_name": "raem_pipeline",
         "summary": final_decision_text[:200],
         "decision": final_signal,
-        "confidence": 0.0,
+        # 🔴 FIXED: this was hardcoded 0.0 for every episode ever saved --
+        # the actual confidence (the same number shown on the frontend as
+        # "confidence 89%", computed in orchestrator.py's _synthesize()
+        # as the mean of the analysts' own reported confidences) was
+        # simply never threaded through to here. That silently discarded
+        # every episode's confidence at save time, making it impossible
+        # to ever check whether RAEM's stated confidence is empirically
+        # justified (e.g. "do 85%+ confidence BUYs actually win more
+        # often than 50% confidence ones?") -- see
+        # eval_metrics.py::confidence_calibration() for that analysis,
+        # which depends entirely on this field actually being populated
+        # going forward.
+        "confidence": float(confidence) if confidence is not None else 0.0,
         "risk": "N/A",
         "source": "raem_pipeline",
         "version": "1.0",
