@@ -201,3 +201,132 @@ def compute_evaluation_metrics(episode_metadatas: list[dict]) -> dict:
         "win_rate_pct": win_rate_pct(outcome_labels),
         "calmar_ratio": calmar_ratio(pnl_series, trade_dates),
     }
+
+
+# --------------------------------------------------------------------------
+# Confidence calibration
+# --------------------------------------------------------------------------
+_CONFIDENCE_BUCKETS = [
+    ("< 50%", 0.0, 0.5),
+    ("50-70%", 0.5, 0.7),
+    ("70-85%", 0.7, 0.85),
+    ("85-100%", 0.85, 1.01),  # 1.01 so a stated 100% (1.0) falls in this bucket, not excluded
+]
+
+
+def confidence_calibration(episode_metadatas: list[dict]) -> list[dict]:
+    """The genuine, data-grounded answer to "how much should I trust
+    RAEM's stated confidence?" -- rather than taking a "confidence 89%"
+    label at face value (an LLM's own self-report, not a statistically
+    derived figure the way ARIMA's confidence interval is), this buckets
+    every RESOLVED episode by its saved `confidence` field (see
+    memory.py::build_episode_document -- this depends on that field
+    actually being populated, which was a separate bug fixed alongside
+    this function; episodes saved before that fix have confidence=0.0
+    and will only ever land in the "< 50%" bucket, which will silently
+    under-represent that bucket's true episode count until enough
+    post-fix episodes accumulate) and reports the ACTUAL historical win
+    rate within each bucket.
+
+    A well-calibrated system's buckets should roughly track their own
+    labels -- the "85-100%" bucket should win noticeably more often than
+    the "50-70%" bucket. If it doesn't (e.g. "85-100%" wins 40% of the
+    time and "50-70%" wins 60%), that's a concrete, actionable finding:
+    RAEM's stated confidence isn't tracking its actual reliability, and
+    the pipeline is either overconfident, underconfident, or the
+    confidence signal itself needs recalibrating (a natural extension:
+    weight it toward the Decision Verifier's / debate margin instead of
+    pure analyst-confidence average -- see runner.py's episode_confidence
+    calc for what's currently averaged in).
+
+    Returns one dict per bucket: {"bucket": "70-85%", "n_trades": int,
+    "win_rate_pct": float, "avg_pnl_pct": float} -- buckets with zero
+    episodes are still included (win_rate_pct/avg_pnl_pct as None) so the
+    full table renders consistently even with sparse history.
+    """
+    results = []
+    for label, lo, hi in _CONFIDENCE_BUCKETS:
+        bucket_rows = [
+            m for m in episode_metadatas
+            if lo <= _safe_float(m.get("confidence")) < hi
+        ]
+        if not bucket_rows:
+            results.append({"bucket": label, "n_trades": 0, "win_rate_pct": None, "avg_pnl_pct": None})
+            continue
+        outcome_labels = [m.get("outcome_label", "") for m in bucket_rows]
+        pnl_series = [_safe_float(m.get("pnl_pct")) for m in bucket_rows]
+        results.append({
+            "bucket": label,
+            "n_trades": len(bucket_rows),
+            "win_rate_pct": win_rate_pct(outcome_labels),
+            "avg_pnl_pct": round(sum(pnl_series) / len(pnl_series), 3) if pnl_series else None,
+        })
+    return results
+
+
+# --------------------------------------------------------------------------
+# Forecast accuracy (Forecast Analyst -- see app/pipeline/stock_forecast.py
+# and memory.py::backfill_pending_forecasts, which this rolls up)
+# --------------------------------------------------------------------------
+def forecast_accuracy(episode_metadatas: list[dict]) -> dict:
+    """Summarizes how far off the Forecast Analyst's ARIMA point forecast
+    was, across every episode whose forecast has actually RESOLVED (i.e.
+    forecast_status == "RESOLVED" -- its horizon has elapsed and
+    backfill_pending_forecasts has recorded forecast_error_pct). This is
+    a genuinely different question from the trading-outcome metrics above
+    (win rate, Sharpe, etc.): it asks "was the *number* right", not "was
+    the *trade* profitable" -- a forecast can be numerically close and
+    still point the wrong trading direction, or be numerically far off
+    while the trade still worked out, so don't conflate this with
+    win_rate_pct.
+
+    Returns {"n_forecasts": int, "mape_pct": float | None,
+    "mean_error_pct": float | None, "within_ci_pct": float | None}:
+      - mape_pct: Mean Absolute Percentage Error -- average of
+        |forecast_error_pct| across resolved forecasts. Lower is better;
+        this is the standard headline accuracy number for point
+        forecasts in forecasting research.
+      - mean_error_pct: the *signed* average (not absolute) -- reveals
+        systematic bias, e.g. consistently forecasting too low (positive
+        mean_error_pct, since error_pct is defined as (actual-forecast)/
+        actual) vs. genuinely random over/under estimation (mean near 0
+        even if mape_pct is large).
+      - within_ci_pct: % of resolved forecasts where the actual price
+        fell inside the originally stated [forecast_lower, forecast_upper]
+        95% band. For a well-calibrated model this should be close to
+        95% -- much lower means the model is overconfident (bands too
+        narrow), much higher means it's underconfident (bands
+        unnecessarily wide).
+    Returns all None fields with n_forecasts=0 if nothing has resolved
+    yet -- forecasts take up to `horizon_days` (30 by default) to
+    resolve, so this will legitimately be empty for a while after the
+    Forecast Analyst stage is first deployed.
+    """
+    resolved = [m for m in episode_metadatas if m.get("forecast_status") == "RESOLVED"]
+    if not resolved:
+        return {"n_forecasts": 0, "mape_pct": None, "mean_error_pct": None, "within_ci_pct": None}
+
+    errors, within_ci = [], 0
+    for m in resolved:
+        err = _safe_float(m.get("forecast_error_pct"))
+        if err is None:
+            continue
+        errors.append(err)
+
+        actual = _safe_float(m.get("forecast_actual_price"))
+        lower = _safe_float(m.get("forecast_lower"))
+        upper = _safe_float(m.get("forecast_upper"))
+        if actual is not None and lower is not None and upper is not None and lower <= actual <= upper:
+            within_ci += 1
+
+    if not errors:
+        return {"n_forecasts": len(resolved), "mape_pct": None, "mean_error_pct": None, "within_ci_pct": None}
+
+    mape = sum(abs(e) for e in errors) / len(errors)
+    mean_err = sum(errors) / len(errors)
+    return {
+        "n_forecasts": len(resolved),
+        "mape_pct": round(mape, 3),
+        "mean_error_pct": round(mean_err, 3),
+        "within_ci_pct": round(within_ci / len(resolved) * 100, 1),
+    }
