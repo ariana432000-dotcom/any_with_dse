@@ -38,7 +38,6 @@ STAGES = [
     ("news", "News Analyst"),
     ("sentiment", "Sentiment Analyst"),
     ("macro_regime", "Macro Regime Analyst"),
-    ("forecast", "Forecast Analyst"),
     ("investment_debate", "Bull vs Bear Debate"),
     ("investment_facilitator", "Investment Facilitator"),
     ("memory", "Episodic Memory (RAEM)"),
@@ -122,14 +121,6 @@ class PipelineRunner:
                            "purpose": "resolve older PENDING episodes with today's close price"}
         try:
             res = memory.backfill_pending_outcomes(self.company, self.trade_date)
-            # Also resolves any forecasts whose own horizon has elapsed (see
-            # memory.py::backfill_pending_forecasts) -- merged into this same
-            # stage's meta rather than a separate pipeline stage, since this
-            # is a rare event (forecasts resolve on a ~30-day cycle, not
-            # every run) that would otherwise clutter the UI with an
-            # almost-always-empty card.
-            forecast_res = memory.backfill_pending_forecasts(self.company, self.trade_date)
-            res["forecast_backfill"] = forecast_res
             html = self._backfill_html(res)
             yield {"type": "stage_done", "stage": "outcome_backfill", "html": html, "meta": res,
                    "input": backfill_input}
@@ -242,23 +233,6 @@ class PipelineRunner:
                "meta": {"macro_regime": out.get("macro_regime", ""),
                         "macro_snapshot": out.get("macro_snapshot", {})},
                "input": macro_input}
-
-        # -- forecast (per-stock ARIMA price forecast, feeds into the debate) --
-        idx += 1
-        yield self._start("forecast", idx)
-        logs = []
-        node = agents.create_forecast_analyst(llm, log=logs.append)
-        forecast_input = {"company": self.company, "date": self.trade_date, "method": "ARIMA"}
-        out = node(self.state)
-        self.state.update(out)
-        for ln in logs:
-            yield {"type": "log", "stage": "forecast", "line": ln}
-        self.session.log_step("Forecast Analyst", forecast_input,
-                              {"forecast_data": out.get("forecast_data"), "report": out.get("forecast_report", "")})
-        yield {"type": "stage_done", "stage": "forecast",
-               "html": md_to_html(out.get("forecast_report", "")),
-               "meta": out.get("forecast_data") or {"available": False},
-               "input": forecast_input}
 
         # -- investment debate --
         idx += 1
@@ -573,7 +547,6 @@ class PipelineRunner:
                 verifier_status=verification.get("status"),
                 llm_provider=self._llm_provider,
                 confidence=episode_confidence,
-                forecast_data=self.state.get("forecast_data"),
                 # 🔴 FIXED: without this, two runs for the same ticker on
                 # the same calendar day (e.g. Kimi then Sonnet -- exactly
                 # the documented workflow for a provider comparison, or

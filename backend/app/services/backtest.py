@@ -22,7 +22,7 @@ these fields.
 from __future__ import annotations
 
 from app.pipeline.memory import RAEMMemory
-from app.services.eval_metrics import compute_evaluation_metrics, confidence_calibration, forecast_accuracy
+from app.services.eval_metrics import compute_evaluation_metrics, confidence_calibration
 
 
 def _safe_float(v) -> float:
@@ -105,14 +105,6 @@ def compute_backtest(ticker: str | None = None, limit: int = 500) -> dict:
     all_eps = memory.list_episodes(company=ticker.upper() if ticker else None, limit=limit)
     resolved = [e for e in all_eps if e["metadata"].get("outcome_status") == "RESOLVED"]
     resolved.sort(key=lambda e: e["metadata"].get("trade_date", ""))  # chronological
-    # 🔴 Deliberately a SEPARATE filter from `resolved` above -- forecast_status
-    # and outcome_status resolve on independent timelines (a forecast's
-    # horizon is typically ~30 days vs. the trade outcome's 1-day minimum,
-    # see memory.py::backfill_pending_forecasts's own docstring), so an
-    # episode can be outcome-RESOLVED while its forecast is still PENDING,
-    # or vice versa. Reusing `resolved` here would silently exclude
-    # forecast-resolved episodes whose trade outcome hasn't resolved yet.
-    forecast_resolved = [e for e in all_eps if e["metadata"].get("forecast_status") == "RESOLVED"]
 
     wins = sum(1 for e in resolved if e["metadata"].get("outcome_label") == "WIN")
     losses = sum(1 for e in resolved if e["metadata"].get("outcome_label") == "LOSS")
@@ -171,8 +163,4 @@ def compute_backtest(ticker: str | None = None, limit: int = 500) -> dict:
         # trustworthy confidence measure than the raw self-reported
         # number alone.
         "confidence_calibration": confidence_calibration([e["metadata"] for e in resolved]),
-        # ARIMA point-forecast accuracy (MAPE, bias, CI coverage) -- see
-        # forecast_accuracy()'s own docstring. Uses forecast_resolved, NOT
-        # resolved -- see that list's own comment above for why.
-        "forecast_accuracy": forecast_accuracy([e["metadata"] for e in forecast_resolved]),
     }

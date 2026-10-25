@@ -857,7 +857,6 @@ def _reports(state):
     return (
         str(state["market_report"])[:1800], str(state["sentiment_report"])[:1800],
         str(state["news_report"])[:1800], str(state["fundamentals_report"])[:1800],
-        str(state.get("forecast_report", "(no forecast available)"))[:800],
     )
 
 
@@ -866,7 +865,7 @@ def create_bull_researcher(llm):
 
     def node(state):
         ds = state["investment_debate_state"]
-        market, sentiment, news, fundamentals, forecast = _reports(state)
+        market, sentiment, news, fundamentals = _reports(state)
         # 🔴 FIXED: used to read ds['current_response'] -- a single shared
         # field that only correctly means "the Bear's last argument" if
         # Bear is *guaranteed* to have spoken most recently, i.e. only
@@ -882,7 +881,6 @@ Market report: {market}
 Sentiment report: {sentiment}
 News report: {news}
 Fundamentals report: {fundamentals}
-Statistical forecast (price-history only, no fundamentals/news factored in): {forecast}
 Debate history: {ds.get('history', '')}
 Last bear argument: {last_bear_argument}
 Present a compelling bull argument with specific growth opportunities and strengths.
@@ -904,7 +902,7 @@ def create_bear_researcher(llm):
 
     def node(state):
         ds = state["investment_debate_state"]
-        market, sentiment, news, fundamentals, forecast = _reports(state)
+        market, sentiment, news, fundamentals = _reports(state)
         # 🔴 FIXED: same fix as create_bull_researcher above, mirrored --
         # reads Bull's last turn from bull_history by name instead of the
         # generic current_response field.
@@ -915,7 +913,6 @@ Market report: {market}
 Sentiment report: {sentiment}
 News report: {news}
 Fundamentals report: {fundamentals}
-Statistical forecast (price-history only, no fundamentals/news factored in): {forecast}
 Debate history: {ds.get('history', '')}
 Last bull argument: {last_bull_argument}
 Present a compelling bear argument with specific risks and weaknesses.
@@ -1502,74 +1499,6 @@ Rule-based macro regime tag: {macro_regime}
         log("macro regime report ready")
 
         return {"macro_report": report, "macro_regime": macro_regime, "macro_snapshot": snapshot}
-
-    return node
-
-
-# ==========================================================================
-# Forecast Analyst — per-stock statistical (ARIMA) price forecast
-# ==========================================================================
-def create_forecast_analyst(llm, log=print):
-    """Reports a code-computed ARIMA forecast (see
-    app/pipeline/stock_forecast.py) as a factual, structured statement --
-    the LLM's job here is narrow: explain what the forecast says and its
-    uncertainty, not to invent a different number or second-guess the
-    arithmetic. This mirrors the "don't let the LLM re-derive what code
-    already computed correctly" principle already applied to the
-    Fundamentals Analyst's Current Price field.
-
-    Output feeds into the Bull/Bear debate via _reports() below, and its
-    raw numbers get saved onto the episode (forecast_price/forecast_lower/
-    forecast_upper) for later accuracy tracking once the horizon elapses
-    (see memory.py::backfill_pending_forecasts)."""
-    from langchain_core.messages import HumanMessage, SystemMessage
-
-    def node(state):
-        current_date = state["trade_date"]
-        company = state["company_of_interest"]
-        log(f"Computing ARIMA price forecast for {company} on {current_date}")
-
-        from app.pipeline.stock_forecast import forecast_stock_price
-        try:
-            result = forecast_stock_price(company, current_date)
-        except Exception as e:  # noqa: BLE001
-            result = {"forecast_price": None, "error": str(e)}
-
-        if result.get("forecast_price") is None:
-            log(f"forecast unavailable: {result.get('error')}")
-            report = (
-                f"**Forecast Analyst — {company}**\n\n"
-                f"No statistical forecast could be produced: {result.get('error', 'unknown reason')}.\n"
-                f"This is most often too little trading history for a newly listed or very "
-                f"thinly-traded name. Treat this analysis as unavailable rather than assuming "
-                f"a neutral/flat forecast."
-            )
-            return {"forecast_report": report, "forecast_data": None}
-
-        prompt = f"""You are the Forecast Analyst. A statistical model (ARIMA{tuple(result['order'])},
-fit on {result['n_history_days']} trading days of {company}'s own closing prices) has already
-computed the numbers below. Your job is ONLY to explain what they mean and their uncertainty --
-do NOT invent a different forecast, do NOT adjust these numbers, and do NOT let your own opinion
-of the stock change what's reported here.
-
-Current price: {result['entry_price']}
-{result['horizon_days']}-day-ahead point forecast: {result['forecast_price']}
-95% confidence range: {result['forecast_lower']} to {result['forecast_upper']}
-
-Write 2-3 sentences: (1) state the point forecast and its direction relative to the current
-price, (2) state the confidence range and note that a wider range means more uncertainty, not a
-stronger or weaker signal, (3) explicitly note this reflects ONLY the stock's own historical
-price pattern -- no fundamentals, news, or sentiment are factored in here.
-"""
-        messages = [
-            SystemMessage(content="You are a statistical forecast analyst. Report the given "
-                                  "numbers accurately; never substitute your own estimate."),
-            HumanMessage(content=prompt),
-        ]
-        narrative = invoke_llm_with_retry(llm, messages).content
-        report = f"**Forecast Analyst — {company} (ARIMA{tuple(result['order'])})**\n\n{narrative}"
-        log("forecast report ready")
-        return {"forecast_report": report, "forecast_data": result}
 
     return node
 
